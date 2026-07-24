@@ -77,23 +77,28 @@
   #addStruct{background:var(--panel2); color:var(--text); border:1px solid var(--border);
     border-radius:5px; padding:3px 10px; cursor:pointer; font:inherit;}
   #structList{flex:1; overflow-y:auto; padding:4px 8px;}
-  .srow{display:flex; align-items:center; gap:6px; padding:5px 6px; margin:2px 0;
+  .srow{display:flex; align-items:center; gap:3px; padding:5px 4px; margin:2px 0;
     border-radius:5px; border:1px solid transparent; cursor:pointer;}
   .srow:hover{background:var(--panel2);}
   .srow.active{background:var(--panel2); border-color:var(--accent);}
-  .srow input[type=color]{width:20px; height:20px; padding:0; border:none;
+  .srow input[type=color]{width:18px; height:18px; padding:0; border:none;
     background:none; cursor:pointer; flex:none;}
-  .srow .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .srow .nm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .srow .nm input{width:100%; font:inherit; background:var(--bg); color:var(--text);
     border:1px solid var(--accent); border-radius:3px; padding:1px 3px;}
   .srow .eye,.srow .del{background:none; border:none; color:var(--dim);
-    cursor:pointer; font-size:14px; padding:0 2px; flex:none;}
+    cursor:pointer; font-size:13px; padding:0 1px; flex:none;}
   .srow .eye.off{opacity:.35;}
   .srow .del:hover{color:#ff6b6b;}
   .srow .move{background:none; border:none; color:var(--dim); cursor:pointer;
-    font-size:10px; line-height:1; padding:0 1px; flex:none;}
+    font-size:9px; line-height:1; padding:0; flex:none;}
   .srow .move:hover:not(:disabled){color:var(--text);}
   .srow .move:disabled{opacity:.2; cursor:default;}
+  .srow .draghandle{cursor:grab; color:var(--dim); flex:none; font-size:12px;
+    padding:0 1px; user-select:none; line-height:1;}
+  .srow .draghandle:hover{color:var(--text);}
+  .srow.dragging{opacity:.4;}
+  .srow.drag-over{border-color:var(--accent); background:var(--panel2);}
 
   /* status bar */
   #status{display:flex; gap:18px; padding:5px 12px; background:var(--panel);
@@ -301,6 +306,16 @@ function moveStructure(i, dir){
   [structures[i], structures[j]] = [structures[j], structures[i]];
   if(activeIdx === i) activeIdx = j;
   else if(activeIdx === j) activeIdx = i;
+  refreshUI();
+}
+// Arbitrary drag-and-drop reorder: move the structure at `from` so it sits at `to`.
+function reorderStructure(from, to){
+  if(from === to || from < 0 || from >= structures.length || to < 0 || to >= structures.length) return;
+  pushUndo();
+  const activeObj = structures[activeIdx];
+  const [item] = structures.splice(from, 1);
+  structures.splice(to, 0, item);
+  activeIdx = structures.indexOf(activeObj);
   refreshUI();
 }
 
@@ -837,6 +852,31 @@ function renderList(){
     const row = document.createElement('div');
     row.className = 'srow' + (i === activeIdx ? ' active' : '');
     row.addEventListener('click', () => setActive(i));
+    row.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', e => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+      if(!Number.isNaN(from)) reorderStructure(from, i);
+    });
+
+    const handle = document.createElement('span');
+    handle.className = 'draghandle';
+    handle.textContent = '⋮⋮';
+    handle.title = 'Drag to reorder';
+    handle.draggable = true;
+    handle.addEventListener('click', e => e.stopPropagation());
+    handle.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', String(i));
+      e.dataTransfer.effectAllowed = 'move';
+      row.classList.add('dragging');
+    });
+    handle.addEventListener('dragend', () => row.classList.remove('dragging'));
 
     const col = document.createElement('input');
     col.type = 'color';
@@ -914,7 +954,7 @@ function renderList(){
       moveStructure(i, 1);
     });
 
-    row.append(col, nm, eye, up, down, del);
+    row.append(handle, col, nm, eye, up, down, del);
     list.appendChild(row);
   });
 }
@@ -1163,7 +1203,7 @@ window.__sandbox = {
     renderBooleanPanel();
   },
   view,
-  setActive, addStructure, deleteStructure, moveStructure, setTool,
+  setActive, addStructure, deleteStructure, moveStructure, reorderStructure, setTool,
   computeBooleanChain, applyBooleanChain,
   morphMask, polygonRegion, rectRegion, shapeRegion, applyRegion,
   stampDisc, stampSegment,
