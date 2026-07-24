@@ -18,6 +18,22 @@
   }
   #main{flex:1; display:flex; min-height:0;}
 
+  /* top toolbar: history / view / export controls, separate from the
+     drawing-tool palette in the left sidebar */
+  #topbar{display:flex; align-items:center; gap:20px; padding:8px 16px;
+    background:var(--panel); border-bottom:1px solid var(--border); flex-wrap:wrap;}
+  .topgroup{display:flex; align-items:center; gap:6px;}
+  .topgroup .glabel{color:var(--dim); font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; margin-right:2px;}
+  #topbar button{padding:6px 10px; background:var(--panel2); color:var(--text);
+    border:1px solid var(--border); border-radius:5px; cursor:pointer; font:inherit;
+    white-space:nowrap;}
+  #topbar button:hover:not(:disabled){border-color:var(--dim);}
+  #topbar button:disabled{opacity:.4; cursor:default;}
+  #topbar select{background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    border-radius:4px; padding:4px; font:inherit;}
+  #topbar input[type=range]{width:110px;}
+
   /* left toolbar + settings */
   #toolbar{
     width:210px; background:var(--panel); border-right:1px solid var(--border);
@@ -32,15 +48,11 @@
   }
   .toolbtns button:hover{border-color:var(--dim);}
   .toolbtns button.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
-  .histbtns{display:flex; gap:6px; padding:6px 10px;}
-  .histbtns button{flex:1; padding:6px; background:var(--panel2); color:var(--text);
-    border:1px solid var(--border); border-radius:5px; cursor:pointer; font:inherit;}
-  .histbtns button:disabled{opacity:.4; cursor:default;}
   .panel{display:none; padding:8px 12px 12px; border-top:1px solid var(--border);}
   .panel.show{display:block;}
   .panel h3{font-size:12px; margin-bottom:8px; color:var(--accent);}
   .panel label{display:block; margin:5px 0; cursor:pointer;}
-  .panel .row{display:flex; align-items:center; gap:6px; margin:6px 0;}
+  .row{display:flex; align-items:center; gap:6px; margin:6px 0;}
   .boolstep{border:1px solid var(--border); border-radius:5px; background:var(--panel2);
     padding:6px; margin:6px 0;}
   .boolstep select{width:100%; margin-bottom:4px;}
@@ -87,13 +99,23 @@
   #side .hdr{display:flex; align-items:center; justify-content:space-between;
     padding:10px 12px 6px;}
   #side .hdr h2{font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);}
-  #addStruct{background:var(--panel2); color:var(--text); border:1px solid var(--border);
-    border-radius:5px; padding:3px 10px; cursor:pointer; font:inherit;}
+  .hdrbtns{display:flex; gap:4px;}
+  .hdrbtns button{background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    border-radius:5px; padding:3px 8px; cursor:pointer; font:inherit;}
+  .hdrbtns button:hover:not(:disabled){border-color:var(--accent); color:var(--accent);}
+  .hdrbtns button:disabled{opacity:.35; cursor:default;}
+  #batchBar{display:flex; align-items:center; gap:6px; padding:6px 12px;
+    background:var(--panel2); border-bottom:1px solid var(--border); font-size:12px;}
+  #batchBar #batchCount{color:var(--dim); flex:1;}
+  #batchBar button{background:var(--panel); color:var(--text); border:1px solid var(--border);
+    border-radius:4px; padding:3px 6px; cursor:pointer; font:inherit; font-size:12px; white-space:nowrap;}
+  #batchBar button:hover{border-color:var(--accent); color:var(--accent);}
   #structList{flex:1; overflow-y:auto; padding:4px 8px;}
   .srow{display:flex; align-items:center; gap:3px; padding:5px 4px; margin:2px 0;
     border-radius:5px; border:1px solid transparent; cursor:pointer;}
   .srow:hover{background:var(--panel2);}
   .srow.active{background:var(--panel2); border-color:var(--accent);}
+  .srow.multisel{background:rgba(79,195,247,.12); border-color:rgba(79,195,247,.4);}
   .srow input[type=color]{width:18px; height:18px; padding:0; border:none;
     background:none; cursor:pointer; flex:none;}
   .srow .nm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -120,6 +142,34 @@
 </style>
 </head>
 <body>
+<div id="topbar">
+  <div class="topgroup">
+    <span class="glabel">History</span>
+    <button id="undoBtn" title="Ctrl+Z">Undo</button>
+    <button id="redoBtn" title="Ctrl+Y">Redo</button>
+  </div>
+  <div class="topgroup">
+    <span class="glabel">View</span>
+    <button id="fitBtn" title="Fit canvas to view">Fit</button>
+    <select id="zoomPreset">
+      <option value="" selected disabled>Zoom to&hellip;</option>
+      <option value="25">25%</option>
+      <option value="50">50%</option>
+      <option value="100">100%</option>
+      <option value="150">150%</option>
+      <option value="200">200%</option>
+      <option value="400">400%</option>
+      <option value="fit">Fit</option>
+    </select>
+    <input type="range" id="zoomSlider" min="10" max="400" step="5" value="100">
+    <button id="resetViewBtn">Reset view</button>
+  </div>
+  <div class="topgroup">
+    <span class="glabel">Export</span>
+    <button id="exportPngBtn">PNG</button>
+    <button id="exportJsonBtn">JSON</button>
+  </div>
+</div>
 <div id="main">
   <div id="toolbar">
     <h2>Tools</h2>
@@ -132,11 +182,6 @@
       <button data-tool="boolean">Boolean</button>
       <button data-tool="extend">Extend</button>
       <button data-tool="translate">Translate</button>
-    </div>
-    <div class="histbtns">
-      <button id="undoBtn" title="Ctrl+Z">Undo</button>
-      <button id="redoBtn" title="Ctrl+Y">Redo</button>
-      <button id="fitBtn" title="Fit canvas to view">Fit</button>
     </div>
 
     <div class="panel" id="set-pencil">
@@ -272,7 +317,21 @@
   </div>
 
   <div id="side">
-    <div class="hdr"><h2>Structures</h2><button id="addStruct">+ Add</button></div>
+    <div class="hdr">
+      <h2>Structures</h2>
+      <div class="hdrbtns">
+        <button id="addStruct" title="Add new structure">+ Add</button>
+        <button id="copyStructBtn" title="Copy active structure (Ctrl+C)">&#10697;</button>
+        <button id="pasteStructBtn" title="Paste as new structure (Ctrl+V)" disabled>&#128203;</button>
+      </div>
+    </div>
+    <div id="batchBar" style="display:none">
+      <span id="batchCount"></span>
+      <button id="batchShowBtn" title="Show selected">&#128065;</button>
+      <button id="batchHideBtn" title="Hide selected">&#10060;</button>
+      <button id="batchUnionBtn" title="Union selected into a new structure">&cup; New</button>
+      <button id="batchDeleteBtn" title="Delete selected">&#10005; Delete</button>
+    </div>
     <div id="structList"></div>
   </div>
 </div>
@@ -348,8 +407,91 @@ function deleteStructure(i){
   pushUndo();
   structures.splice(i, 1);
   if(activeIdx >= structures.length) activeIdx = structures.length - 1;
+  multiSelect.clear();
   refreshToolPreviews();
   refreshUI();
+}
+
+/* ============================ copy / paste structure ============================ */
+let structureClipboard = null;   // {name, color, mask}
+function copyActiveStructure(){
+  const s = active();
+  if(!s) return;
+  structureClipboard = {name: s.name, color: s.color, mask: new Uint8Array(s.mask)};
+  $('pasteStructBtn').disabled = false;
+}
+function pasteStructure(){
+  if(!structureClipboard) return;
+  pushUndo();
+  const s = makeStructure(`${structureClipboard.name} copy`, structureClipboard.color);
+  s.mask.set(structureClipboard.mask);
+  structures.push(s);
+  activeIdx = structures.length - 1;
+  refreshUI();
+}
+
+/* ============================ multi-select / batch operations ============================ */
+let multiSelect = new Set();     // indices selected for batch ops, in addition to activeIdx
+let lastClickedIndex = 0;        // anchor for shift-click range selection
+function clickStructureRow(i, e){
+  if(e.shiftKey){
+    const a = Math.min(lastClickedIndex, i), b = Math.max(lastClickedIndex, i);
+    multiSelect = new Set();
+    for(let k = a; k <= b; k++) multiSelect.add(k);
+    refreshUI();
+  }else if(e.ctrlKey || e.metaKey){
+    if(multiSelect.has(i)) multiSelect.delete(i); else multiSelect.add(i);
+    lastClickedIndex = i;
+    refreshUI();
+  }else{
+    // Plain click: setActive() already refreshes (and no-ops on reselecting the
+    // active row — required so double-clicking a name can still fire a native
+    // dblclick to rename). Only force a refresh here if a multi-selection needs
+    // clearing that setActive's no-op path wouldn't otherwise repaint.
+    const hadSelection = multiSelect.size > 0;
+    multiSelect.clear();
+    lastClickedIndex = i;
+    if(i === activeIdx){
+      if(hadSelection) refreshUI();
+    }else{
+      setActive(i);
+    }
+  }
+}
+function batchDelete(){
+  if(!multiSelect.size) return;
+  pushUndo();
+  [...multiSelect].sort((a, b) => b - a).forEach(i => structures.splice(i, 1));
+  multiSelect.clear();
+  if(activeIdx >= structures.length) activeIdx = structures.length - 1;
+  refreshToolPreviews();
+  refreshUI();
+}
+function batchSetVisible(visible){
+  if(!multiSelect.size) return;
+  pushUndo();
+  for(const i of multiSelect) if(structures[i]) structures[i].visible = visible;
+  refreshUI();
+}
+function batchUnionToNew(){
+  if(multiSelect.size < 2) return;
+  pushUndo();
+  const idxs = [...multiSelect].sort((a, b) => a - b);
+  let result = new Uint8Array(structures[idxs[0]].mask);
+  for(let k = 1; k < idxs.length; k++) result = combineMasks(result, structures[idxs[k]].mask, 'union');
+  const name = idxs.map(i => structures[i].name).join(' + ');
+  const s = makeStructure(name, PALETTE[structures.length % PALETTE.length]);
+  s.mask = result;
+  structures.push(s);
+  activeIdx = structures.length - 1;
+  multiSelect.clear();
+  refreshUI();
+}
+function renderBatchBar(){
+  const n = multiSelect.size;
+  $('batchBar').style.display = n ? 'flex' : 'none';
+  if(n) $('batchCount').textContent = `${n} selected`;
+  $('batchUnionBtn').disabled = n < 2;
 }
 function setActive(i){
   // No-op on reselecting the already-active row: renderList() otherwise tears
@@ -967,6 +1109,53 @@ function refreshToolPreviews(){
   refreshTranslatePreview();
 }
 
+/* ============================ export ============================ */
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+// Composite of all visible structures' fill+outline, at native W×H resolution.
+function exportPNG(){
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const cx = c.getContext('2d');
+  for(const s of structures){
+    if(!s.visible) continue;
+    if(s.dirty) rebuildCache(s);
+    cx.drawImage(s.cache, 0, 0);
+  }
+  c.toBlob(blob => { if(blob) downloadBlob(blob, 'contours.png'); });
+}
+function uint8ToBase64(bytes){
+  let binary = '';
+  const chunk = 0x8000;
+  for(let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+function base64ToUint8(b64){
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for(let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+// Structure masks as base64-encoded raw bytes (one byte per pixel, row-major),
+// plus grid dimensions and the mm/px scale, so the export is self-describing.
+function exportJSON(){
+  const data = {
+    width: W, height: H, pxPerMm: PX_PER_MM,
+    structures: structures.map(s => ({
+      name: s.name, color: s.color, visible: s.visible,
+      maskBase64: uint8ToBase64(s.mask),
+    })),
+  };
+  downloadBlob(new Blob([JSON.stringify(data)], {type: 'application/json'}), 'contours.json');
+}
+
 /* ============================ view / coordinates ============================ */
 function cssSize(){ const r = stage.getBoundingClientRect(); return [r.width, r.height]; }
 function screenToMask(sx, sy){
@@ -1096,8 +1285,8 @@ function renderList(){
   list.innerHTML = '';
   structures.forEach((s, i) => {
     const row = document.createElement('div');
-    row.className = 'srow' + (i === activeIdx ? ' active' : '');
-    row.addEventListener('click', () => setActive(i));
+    row.className = 'srow' + (i === activeIdx ? ' active' : '') + (multiSelect.has(i) ? ' multisel' : '');
+    row.addEventListener('click', e => clickStructureRow(i, e));
     row.addEventListener('dragover', e => {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
@@ -1211,6 +1400,7 @@ function updateStatus(){
   $('st-tool').textContent = TOOL_NAMES[tool];
   $('st-struct').textContent = active() ? active().name : 'none';
   $('st-zoom').textContent = Math.round(view.scale * 100) + '%';
+  $('zoomSlider').value = Math.min(400, Math.max(10, Math.round(view.scale * 100)));
   if(cursorPos){
     const x = Math.floor(cursorPos[0]), y = Math.floor(cursorPos[1]);
     $('st-pos').textContent = (x >= 0 && y >= 0 && x < W && y < H) ? `${x}, ${y} px` : '';
@@ -1220,6 +1410,7 @@ function updateStatus(){
 function refreshUI(){
   for(const s of structures) s.dirty = true;   // cheap: caches rebuilt lazily on draw
   renderList();
+  renderBatchBar();
   renderBooleanPanel();
   renderCropPanel();
   refreshHistBtns();
@@ -1389,6 +1580,8 @@ window.addEventListener('keydown', e => {
   if(mod && e.key.toLowerCase() === 'z' && !e.shiftKey){ undo(); e.preventDefault(); }
   else if((mod && e.key.toLowerCase() === 'y') ||
           (mod && e.shiftKey && e.key.toLowerCase() === 'z')){ redo(); e.preventDefault(); }
+  else if(mod && e.key.toLowerCase() === 'c'){ copyActiveStructure(); e.preventDefault(); }
+  else if(mod && e.key.toLowerCase() === 'v'){ pasteStructure(); e.preventDefault(); }
 });
 window.addEventListener('keyup', e => {
   if(e.code === 'Space'){ spaceDown = false; cv.style.cursor = 'crosshair'; }
@@ -1440,6 +1633,19 @@ $('panUpBtn').addEventListener('click', () => panBy(0, -PAN_STEP));
 $('panDownBtn').addEventListener('click', () => panBy(0, PAN_STEP));
 $('panLeftBtn').addEventListener('click', () => panBy(-PAN_STEP, 0));
 $('panRightBtn').addEventListener('click', () => panBy(PAN_STEP, 0));
+// Set zoom to an absolute percentage, anchored at the canvas center.
+function setZoomPct(pct){
+  const [cw, ch] = cssSize();
+  zoomBy((pct / 100) / view.scale, cw / 2, ch / 2);
+}
+$('zoomPreset').addEventListener('change', () => {
+  const v = $('zoomPreset').value;
+  if(v === 'fit') fitView();
+  else if(v) setZoomPct(+v);
+  $('zoomPreset').value = '';
+});
+$('zoomSlider').addEventListener('input', () => setZoomPct(+$('zoomSlider').value));
+$('resetViewBtn').addEventListener('click', fitView);
 $('bool-start').addEventListener('change', () => {
   boolStart = +$('bool-start').value;
   updateBoolExpr();
@@ -1464,6 +1670,14 @@ $('undoBtn').addEventListener('click', undo);
 $('redoBtn').addEventListener('click', redo);
 $('fitBtn').addEventListener('click', fitView);
 $('addStruct').addEventListener('click', () => addStructure());
+$('copyStructBtn').addEventListener('click', copyActiveStructure);
+$('pasteStructBtn').addEventListener('click', pasteStructure);
+$('batchShowBtn').addEventListener('click', () => batchSetVisible(true));
+$('batchHideBtn').addEventListener('click', () => batchSetVisible(false));
+$('batchUnionBtn').addEventListener('click', batchUnionToNew);
+$('batchDeleteBtn').addEventListener('click', batchDelete);
+$('exportPngBtn').addEventListener('click', exportPNG);
+$('exportJsonBtn').addEventListener('click', exportJSON);
 
 /* ============================ init ============================ */
 new ResizeObserver(resizeCanvas).observe(stage);
@@ -1490,6 +1704,8 @@ window.__sandbox = {
   },
   get cropPreview(){ return cropPreview; },
   get transPreview(){ return transPreview; },
+  get multiSelect(){ return multiSelect; },
+  get structureClipboard(){ return structureClipboard; },
   view,
   setActive, addStructure, deleteStructure, moveStructure, reorderStructure, setTool,
   computeBooleanChain, applyBooleanChain,
@@ -1499,7 +1715,11 @@ window.__sandbox = {
   refreshExtendPreview, applyExtend,
   refreshCropPreview, applyCropFromStructure,
   refreshTranslatePreview, applyTranslate,
-  refreshToolPreviews, zoomBy, panBy, refreshUI
+  refreshToolPreviews, zoomBy, panBy, setZoomPct,
+  copyActiveStructure, pasteStructure,
+  clickStructureRow, batchDelete, batchSetVisible, batchUnionToNew,
+  exportPNG, exportJSON, uint8ToBase64, base64ToUint8,
+  refreshUI
 };
 </script>
 </body>
