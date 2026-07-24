@@ -41,6 +41,12 @@
   .panel h3{font-size:12px; margin-bottom:8px; color:var(--accent);}
   .panel label{display:block; margin:5px 0; cursor:pointer;}
   .panel .row{display:flex; align-items:center; gap:6px; margin:6px 0;}
+  .boolstep{border:1px solid var(--border); border-radius:5px; background:var(--panel2);
+    padding:6px; margin:6px 0;}
+  .boolstep select{width:100%; margin-bottom:4px;}
+  .boolstep button.stepdel{width:100%; background:none; border:none; color:var(--dim);
+    cursor:pointer; font-size:11px; text-align:right; padding:2px 0;}
+  .boolstep button.stepdel:hover{color:#ff6b6b;}
   .panel input[type=range]{width:100%;}
   .panel input[type=number], .panel select{
     background:var(--panel2); color:var(--text); border:1px solid var(--border);
@@ -161,20 +167,18 @@
 
     <div class="panel" id="set-boolean">
       <h3>Boolean</h3>
-      <div class="grouplbl">Operation</div>
-      <select id="bool-op">
-        <option value="union">Union (A ∪ B)</option>
-        <option value="subtract">Subtract (A − B)</option>
-        <option value="intersect">Intersect (A ∩ B)</option>
-        <option value="xor">XOR (A ⊕ B)</option>
-      </select>
-      <div class="grouplbl">Second structure (B)</div>
-      <select id="bool-b"></select>
+      <div class="grouplbl">Structure 1</div>
+      <select id="bool-start"></select>
+      <div class="grouplbl">Chain</div>
+      <div id="bool-chain"></div>
+      <button type="button" class="apply" id="bool-add-step" style="background:var(--panel2); color:var(--text); border-color:var(--border);">+ Add step</button>
+      <div class="hint" id="bool-expr"></div>
       <div class="grouplbl">Output</div>
-      <label><input type="radio" name="bool-out" value="active" checked> Overwrite active (A)</label>
-      <label><input type="radio" name="bool-out" value="new"> New structure</label>
+      <label><input type="radio" name="bool-out" value="existing" checked> Save to existing structure</label>
+      <select id="bool-out-existing"></select>
+      <label><input type="radio" name="bool-out" value="new"> Save to new structure</label>
+      <input type="text" id="bool-out-name" placeholder="New structure name" style="display:none">
       <button class="apply" id="bool-apply">Apply</button>
-      <div class="hint">A is the active structure.</div>
     </div>
 
     <div class="panel" id="set-extend">
@@ -503,11 +507,13 @@ function morphMask(mask, rPx){
 }
 
 /* ============================ boolean tool ============================ */
-function doBoolean(op, bIdx, toNew){
-  const A = active(), B = structures[bIdx];
-  if(!A || !B || A === B) return;
-  pushUndo();
-  const a = A.mask, b = B.mask;
+// Chain state: result = structures[boolStart] <op0> structures[step0.idx] <op1> structures[step1.idx] ...
+const BOOL_SYM = {union: '∪', subtract: '−', intersect: '∩', xor: '⊕'};
+let boolStart = 0;
+let boolSteps = [];        // [{op, idx}]
+let boolStepsTouched = false;
+
+function combineMasks(a, b, op){
   const out = new Uint8Array(W * H);
   for(let i = 0; i < W * H; i++){
     const p = a[i] !== 0, q = b[i] !== 0;
@@ -520,16 +526,115 @@ function doBoolean(op, bIdx, toNew){
     }
     out[i] = r ? 1 : 0;
   }
-  if(toNew){
-    const sym = {union:'∪', subtract:'−', intersect:'∩', xor:'⊕'}[op];
-    const s = makeStructure(`${A.name} ${sym} ${B.name}`,
-                            PALETTE[structures.length % PALETTE.length]);
-    s.mask = out;
+  return out;
+}
+// Evaluate the chain left-to-right: ((structures[startIdx] op0 s[steps[0].idx]) op1 s[steps[1].idx]) ...
+function computeBooleanChain(startIdx, steps){
+  let result = new Uint8Array(structures[startIdx].mask);
+  for(const step of steps) result = combineMasks(result, structures[step.idx].mask, step.op);
+  return result;
+}
+function boolExprString(){
+  if(!structures[boolStart]) return '';
+  let expr = structures[boolStart].name;
+  for(const step of boolSteps){
+    const s = structures[step.idx];
+    expr += ` ${BOOL_SYM[step.op]} ${s ? s.name : '?'}`;
+  }
+  return expr;
+}
+// Keep boolStart/boolSteps valid as structures are added/removed, and seed one
+// default step the first time a second structure becomes available.
+function ensureBoolDefaults(){
+  if(boolStart >= structures.length) boolStart = Math.max(0, structures.length - 1);
+  boolSteps = boolSteps.filter(st => st.idx < structures.length);
+  for(const st of boolSteps) if(st.idx >= structures.length) st.idx = 0;
+  if(!boolStepsTouched && boolSteps.length === 0 && structures.length >= 2){
+    const idx = structures.findIndex((_, i) => i !== boolStart);
+    boolSteps.push({op: 'union', idx: idx >= 0 ? idx : 0});
+  }
+}
+function renderBooleanPanel(){
+  ensureBoolDefaults();
+
+  const startSel = $('bool-start');
+  startSel.innerHTML = '';
+  structures.forEach((s, i) => {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = s.name;
+    startSel.appendChild(o);
+  });
+  startSel.value = boolStart;
+
+  const chainEl = $('bool-chain');
+  chainEl.innerHTML = '';
+  boolSteps.forEach((step, j) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'boolstep';
+
+    const opSel = document.createElement('select');
+    Object.entries(BOOL_SYM).forEach(([v, sym]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = `${sym} ${v[0].toUpperCase()}${v.slice(1)}`;
+      opSel.appendChild(o);
+    });
+    opSel.value = step.op;
+    opSel.addEventListener('change', () => { step.op = opSel.value; updateBoolExpr(); });
+
+    const structSel = document.createElement('select');
+    structures.forEach((s, i) => {
+      const o = document.createElement('option');
+      o.value = i; o.textContent = s.name;
+      structSel.appendChild(o);
+    });
+    structSel.value = step.idx;
+    structSel.addEventListener('change', () => { step.idx = +structSel.value; updateBoolExpr(); });
+
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'stepdel'; del.textContent = '✕ Remove step';
+    del.title = 'Remove this step';
+    del.addEventListener('click', () => {
+      boolStepsTouched = true;
+      boolSteps.splice(j, 1);
+      renderBooleanPanel();
+    });
+
+    wrap.append(opSel, structSel, del);
+    chainEl.appendChild(wrap);
+  });
+
+  const outSel = $('bool-out-existing');
+  const prevOut = outSel.value;
+  outSel.innerHTML = '';
+  structures.forEach((s, i) => {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = s.name;
+    outSel.appendChild(o);
+  });
+  if([...outSel.options].some(o => o.value === prevOut)) outSel.value = prevOut;
+
+  updateBoolExpr();
+  $('bool-apply').disabled = !structures.length;
+}
+function updateBoolExpr(){
+  $('bool-expr').textContent = boolExprString();
+}
+function applyBooleanChain(){
+  if(!structures.length) return;
+  ensureBoolDefaults();
+  pushUndo();
+  const result = computeBooleanChain(boolStart, boolSteps);
+  if(getRadio('bool-out') === 'new'){
+    const name = $('bool-out-name').value.trim() || boolExprString();
+    const s = makeStructure(name, PALETTE[structures.length % PALETTE.length]);
+    s.mask = result;
     structures.push(s);
     activeIdx = structures.length - 1;
   }else{
-    A.mask = out;
-    A.dirty = true;
+    const outIdx = +$('bool-out-existing').value;
+    structures[outIdx].mask = result;
+    structures[outIdx].dirty = true;
+    activeIdx = outIdx;
   }
   refreshExtendPreview();
   refreshUI();
@@ -775,21 +880,6 @@ function renderList(){
     list.appendChild(row);
   });
 }
-function refreshBooleanOperands(){
-  const sel = $('bool-b');
-  const prev = sel.value;
-  sel.innerHTML = '';
-  structures.forEach((s, i) => {
-    if(i === activeIdx) return;
-    const o = document.createElement('option');
-    o.value = i;
-    o.textContent = s.name;
-    sel.appendChild(o);
-  });
-  if([...sel.options].some(o => o.value === prev)) sel.value = prev;
-  $('bool-apply').disabled = !active() || sel.options.length === 0;
-}
-
 /* ============================ status bar ============================ */
 const TOOL_NAMES = {pencil:'Pencil', shape:'Shape', brush:'Brush', eraser:'Eraser',
                     crop:'Crop', boolean:'Boolean', extend:'Extend'};
@@ -806,7 +896,7 @@ function updateStatus(){
 function refreshUI(){
   for(const s of structures) s.dirty = true;   // cheap: caches rebuilt lazily on draw
   renderList();
-  refreshBooleanOperands();
+  renderBooleanPanel();
   refreshHistBtns();
   updateExtConv();
   updateStatus();
@@ -986,11 +1076,23 @@ document.querySelectorAll('input[name="shape-kind"]').forEach(r =>
     $('shape-sides-row').style.display = getRadio('shape-kind') === 'polygon' ? 'block' : 'none';
     scheduleDraw();
   }));
-$('bool-apply').addEventListener('click', () => {
-  const bIdx = parseInt($('bool-b').value, 10);
-  if(Number.isNaN(bIdx)) return;
-  doBoolean($('bool-op').value, bIdx, getRadio('bool-out') === 'new');
+$('bool-start').addEventListener('change', () => {
+  boolStart = +$('bool-start').value;
+  updateBoolExpr();
 });
+$('bool-add-step').addEventListener('click', () => {
+  boolStepsTouched = true;
+  const idx = structures.findIndex((_, i) => i !== boolStart);
+  boolSteps.push({op: 'union', idx: idx >= 0 ? idx : 0});
+  renderBooleanPanel();
+});
+document.querySelectorAll('input[name="bool-out"]').forEach(r =>
+  r.addEventListener('change', () => {
+    const isNew = getRadio('bool-out') === 'new';
+    $('bool-out-existing').style.display = isNew ? 'none' : 'block';
+    $('bool-out-name').style.display = isNew ? 'block' : 'none';
+  }));
+$('bool-apply').addEventListener('click', applyBooleanChain);
 $('ext-val').addEventListener('input', refreshExtendPreview);
 $('ext-unit').addEventListener('change', refreshExtendPreview);
 $('ext-apply').addEventListener('click', applyExtend);
@@ -1014,9 +1116,18 @@ window.__sandbox = {
   get structures(){ return structures; },
   get activeIdx(){ return activeIdx; },
   get undoDepth(){ return undoStack.length; },
+  get boolStart(){ return boolStart; },
+  get boolSteps(){ return boolSteps; },
+  setBoolChain(startIdx, steps){
+    boolStart = startIdx;
+    boolSteps = steps.map(s => ({...s}));
+    boolStepsTouched = true;
+    renderBooleanPanel();
+  },
   view,
   setActive, addStructure, deleteStructure, setTool,
-  doBoolean, morphMask, polygonRegion, rectRegion, shapeRegion, applyRegion,
+  computeBooleanChain, applyBooleanChain,
+  morphMask, polygonRegion, rectRegion, shapeRegion, applyRegion,
   stampDisc, stampSegment,
   pushUndo, undo, redo,
   refreshExtendPreview, applyExtend, refreshUI
