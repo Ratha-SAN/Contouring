@@ -90,6 +90,10 @@
     cursor:pointer; font-size:14px; padding:0 2px; flex:none;}
   .srow .eye.off{opacity:.35;}
   .srow .del:hover{color:#ff6b6b;}
+  .srow .move{background:none; border:none; color:var(--dim); cursor:pointer;
+    font-size:10px; line-height:1; padding:0 1px; flex:none;}
+  .srow .move:hover:not(:disabled){color:var(--text);}
+  .srow .move:disabled{opacity:.2; cursor:default;}
 
   /* status bar */
   #status{display:flex; gap:18px; padding:5px 12px; background:var(--panel);
@@ -281,8 +285,22 @@ function deleteStructure(i){
   refreshUI();
 }
 function setActive(i){
+  // No-op on reselecting the already-active row: renderList() otherwise tears
+  // down and rebuilds every row on each click, which stops the browser from
+  // ever recognizing two clicks on a name as a dblclick (needed to rename).
+  if(i === activeIdx) return;
   activeIdx = i;
   refreshExtendPreview();
+  refreshUI();
+}
+// Reorder structures (also changes draw/stacking order: later = drawn on top).
+function moveStructure(i, dir){
+  const j = i + dir;
+  if(j < 0 || j >= structures.length) return;
+  pushUndo();
+  [structures[i], structures[j]] = [structures[j], structures[i]];
+  if(activeIdx === i) activeIdx = j;
+  else if(activeIdx === j) activeIdx = i;
   refreshUI();
 }
 
@@ -876,7 +894,27 @@ function renderList(){
       deleteStructure(i);
     });
 
-    row.append(col, nm, eye, del);
+    const up = document.createElement('button');
+    up.className = 'move';
+    up.textContent = '▲';
+    up.title = 'Move up';
+    up.disabled = i === 0;
+    up.addEventListener('click', e => {
+      e.stopPropagation();
+      moveStructure(i, -1);
+    });
+
+    const down = document.createElement('button');
+    down.className = 'move';
+    down.textContent = '▼';
+    down.title = 'Move down';
+    down.disabled = i === structures.length - 1;
+    down.addEventListener('click', e => {
+      e.stopPropagation();
+      moveStructure(i, 1);
+    });
+
+    row.append(col, nm, eye, up, down, del);
     list.appendChild(row);
   });
 }
@@ -1125,7 +1163,7 @@ window.__sandbox = {
     renderBooleanPanel();
   },
   view,
-  setActive, addStructure, deleteStructure, setTool,
+  setActive, addStructure, deleteStructure, moveStructure, setTool,
   computeBooleanChain, applyBooleanChain,
   morphMask, polygonRegion, rectRegion, shapeRegion, applyRegion,
   stampDisc, stampSegment,
