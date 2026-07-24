@@ -134,11 +134,25 @@
     font-size:9px; line-height:1; padding:0; flex:none;}
   .srow .move:hover:not(:disabled){color:var(--text);}
   .srow .move:disabled{opacity:.2; cursor:default;}
+  .srow .propsbtn{background:none; border:none; color:var(--dim); cursor:pointer;
+    font-size:12px; line-height:1; padding:0 1px; flex:none;}
+  .srow .propsbtn:hover{color:var(--text);}
   .srow .draghandle{cursor:grab; color:var(--dim); flex:none; font-size:12px;
     padding:0 1px; user-select:none; line-height:1;}
   .srow .draghandle:hover{color:var(--text);}
   .srow.dragging{opacity:.4;}
   .srow.drag-over{border-color:var(--accent); background:var(--panel2);}
+  .typegroup-header{display:flex; align-items:center; gap:6px; padding:6px 6px 4px;
+    cursor:pointer; color:var(--dim); font-size:11px; text-transform:uppercase;
+    letter-spacing:.06em; user-select:none;}
+  .typegroup-header:hover{color:var(--text);}
+  .typegroup-header .chevron{font-size:9px; width:10px; flex:none;}
+  .sprops{display:flex; flex-direction:column; gap:6px; margin:0 4px 6px 18px; padding:6px 8px;
+    background:var(--panel2); border:1px solid var(--border); border-radius:5px;
+    font-size:11px; cursor:default;}
+  .sprops label{display:flex; flex-direction:column; gap:2px; color:var(--dim);}
+  .sprops input, .sprops select{background:var(--bg); color:var(--text);
+    border:1px solid var(--border); border-radius:3px; padding:3px 4px; font:inherit;}
 
   /* status bar */
   #status{display:flex; gap:18px; padding:5px 12px; background:var(--panel);
@@ -206,24 +220,22 @@
       <label><input type="radio" name="crop-shape" value="rect" checked> Rectangle</label>
       <label><input type="radio" name="crop-shape" value="free"> Freehand</label>
       <label><input type="radio" name="crop-shape" value="structure"> Another structure</label>
-      <div id="crop-structure-opts" style="display:none">
-        <div class="grouplbl">Reference structure</div>
-        <select id="crop-ref"></select>
-        <div class="grouplbl">Distance (+ grow / − shrink)</div>
-        <div class="row">
-          <input type="number" id="crop-margin-val" value="0" step="0.5">
-          <select id="crop-margin-unit" style="width:58px">
-            <option value="px">px</option>
-            <option value="mm">mm</option>
-          </select>
-        </div>
-        <div class="hint" id="crop-margin-conv"></div>
+
+      <div id="crop-drawn-mode">
+        <div class="grouplbl">Mode</div>
+        <label><input type="radio" name="crop-mode" value="keep" checked> Keep inside</label>
+        <label><input type="radio" name="crop-mode" value="remove"> Remove inside</label>
       </div>
-      <div class="grouplbl">Mode</div>
-      <label><input type="radio" name="crop-mode" value="keep" checked> Keep inside</label>
-      <label><input type="radio" name="crop-mode" value="remove"> Remove inside</label>
-      <button class="apply" id="crop-apply" style="display:none">Apply</button>
-      <div class="hint">Rectangle/Freehand: drag on canvas. Another structure: pick a reference and distance, then Apply — preview shown in cyan.</div>
+
+      <div id="crop-structure-opts" style="display:none">
+        <div class="grouplbl">Crop chain (applied in order)</div>
+        <div id="crop-chain"></div>
+        <button type="button" class="apply" id="crop-add-step" style="background:var(--panel2); color:var(--text); border-color:var(--border);">+ Add step</button>
+        <div class="hint" id="crop-expr"></div>
+        <button class="apply" id="crop-apply">Apply</button>
+      </div>
+
+      <div class="hint">Rectangle/Freehand: drag on canvas, release to crop. Another structure: build a chain of reference structures (distance + keep/remove), then Apply — preview shown in yellow.</div>
     </div>
 
     <div class="panel" id="set-boolean">
@@ -367,6 +379,7 @@ const PALETTE = ['#e6194b','#3cb44b','#ffe119','#4363d8','#f58231',
 let structures = [];             // {name, color, visible, mask:Uint8Array, cache, dirty}
 let activeIdx = -1;
 let structCounter = 0;
+let structIdCounter = 0;
 let tool = 'pencil';
 let view = {scale: 1, tx: 0, ty: 0};
 
@@ -400,15 +413,19 @@ function getRadio(name){
 function active(){ return structures[activeIdx] || null; }
 
 /* ============================ structures ============================ */
-function makeStructure(name, color){
+const STRUCTURE_TYPES = ['GTV', 'CTV', 'ITV', 'PTV', 'OAR', 'External', 'Avoidance', 'Other'];
+function makeStructure(name, color, type, id){
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
-  return {name, color, visible: true, mask: new Uint8Array(W * H), cache: c, dirty: true};
+  return {
+    name, color, visible: true, mask: new Uint8Array(W * H), cache: c, dirty: true,
+    type: type || 'Other', id: id != null ? id : String(++structIdCounter),
+  };
 }
-function addStructure(name){
+function addStructure(name, type){
   pushUndo();
   const s = makeStructure(name || `Structure ${++structCounter}`,
-                          PALETTE[structures.length % PALETTE.length]);
+                          PALETTE[structures.length % PALETTE.length], type);
   structures.push(s);
   activeIdx = structures.length - 1;
   refreshUI();
@@ -439,6 +456,18 @@ function pasteStructure(){
   structures.push(s);
   activeIdx = structures.length - 1;
   refreshUI();
+}
+
+/* ============================ structure tree (grouped by type) ============================ */
+let collapsedTypes = new Set();  // type names currently collapsed in the structure tree
+let expandedProps = new Set();   // structure indices whose ID/Type properties panel is open
+function toggleTypeCollapse(type){
+  if(collapsedTypes.has(type)) collapsedTypes.delete(type); else collapsedTypes.add(type);
+  renderList();
+}
+function toggleRowProps(i){
+  if(expandedProps.has(i)) expandedProps.delete(i); else expandedProps.add(i);
+  renderList();
 }
 
 /* ============================ multi-select / batch operations ============================ */
@@ -561,17 +590,19 @@ function rebuildCache(s){
 function snapshot(){
   return {
     activeIdx,
-    structCounter,
+    structCounter, structIdCounter,
     structures: structures.map(s => ({
-      name: s.name, color: s.color, visible: s.visible, mask: new Uint8Array(s.mask)
+      name: s.name, color: s.color, visible: s.visible, type: s.type, id: s.id,
+      mask: new Uint8Array(s.mask)
     }))
   };
 }
 function restore(snap){
   activeIdx = snap.activeIdx;
   structCounter = snap.structCounter;
+  structIdCounter = snap.structIdCounter != null ? snap.structIdCounter : structIdCounter;
   structures = snap.structures.map(s => {
-    const t = makeStructure(s.name, s.color);
+    const t = makeStructure(s.name, s.color, s.type, s.id);
     t.visible = s.visible;
     t.mask.set(s.mask);
     return t;
@@ -971,46 +1002,125 @@ function applyExtend(){
   refreshUI();
 }
 
-/* ============================ crop-to-structure ============================ */
-function cropMarginPx(){
-  const v = parseFloat($('crop-margin-val').value) || 0;
-  return $('crop-margin-unit').value === 'mm' ? v * PX_PER_MM : v;
+/* ============================ crop-to-structure (chain) ============================ */
+// Chain applied to the active structure in order: for each step, grow/shrink
+// the reference structure by its distance, then keep-inside or remove-inside it.
+let cropSteps = [];        // [{refIdx, marginVal, marginUnit, mode}]
+let cropStepsTouched = false;
+function computeCropChain(baseMask, steps){
+  let mask = new Uint8Array(baseMask);
+  for(const step of steps){
+    const ref = structures[step.refIdx];
+    if(!ref) continue;
+    const mPx = stepMarginPx(step);
+    const region = mPx ? morphMask(ref.mask, mPx) : ref.mask;
+    const keep = step.mode === 'keep';
+    for(let i = 0; i < W * H; i++){
+      if(keep ? !region[i] : region[i]) mask[i] = 0;
+    }
+  }
+  return mask;
 }
-function updateCropMarginConv(){
-  const v = parseFloat($('crop-margin-val').value) || 0;
-  const px = cropMarginPx();
-  $('crop-margin-conv').textContent = $('crop-margin-unit').value === 'mm'
-    ? `= ${px} px` : `= ${(v / PX_PER_MM).toFixed(1)} mm`;
+function cropExprString(){
+  const s = active();
+  if(!s) return '';
+  let expr = s.name;
+  for(const step of cropSteps){
+    const ref = structures[step.refIdx];
+    const name = ref ? ref.name : '?';
+    const mPx = stepMarginPx(step);
+    const tag = mPx !== 0 ? `[${mPx > 0 ? '+' : ''}${step.marginVal}${step.marginUnit || 'px'}]` : '';
+    expr += ` → ${step.mode === 'keep' ? 'keep in' : 'remove in'} ${name}${tag}`;
+  }
+  return expr;
+}
+// Keep cropSteps valid as structures are added/removed, and seed one default
+// step the first time a second structure becomes available.
+function ensureCropDefaults(){
+  cropSteps = cropSteps.filter(st => st.refIdx < structures.length);
+  for(const st of cropSteps) if(st.refIdx >= structures.length) st.refIdx = 0;
+  if(!cropStepsTouched && cropSteps.length === 0 && structures.length >= 2){
+    const idx = structures.findIndex((_, i) => i !== activeIdx);
+    cropSteps.push({refIdx: idx >= 0 ? idx : 0, marginVal: 0, marginUnit: 'px', mode: 'keep'});
+  }
 }
 function renderCropPanel(){
-  const sel = $('crop-ref');
-  const prev = sel.value;
-  sel.innerHTML = '';
-  structures.forEach((s, i) => {
-    const o = document.createElement('option');
-    o.value = i; o.textContent = s.name;
-    sel.appendChild(o);
+  ensureCropDefaults();
+  const chainEl = $('crop-chain');
+  chainEl.innerHTML = '';
+  cropSteps.forEach((step, j) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'boolstep';
+
+    const refSel = document.createElement('select');
+    structures.forEach((s, i) => {
+      const o = document.createElement('option');
+      o.value = i; o.textContent = s.name;
+      refSel.appendChild(o);
+    });
+    refSel.value = step.refIdx;
+    refSel.addEventListener('change', () => { step.refIdx = +refSel.value; updateCropExpr(); refreshToolPreviews(); });
+
+    const modeSel = document.createElement('select');
+    [['keep', 'Keep inside'], ['remove', 'Remove inside']].forEach(([v, l]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = l;
+      modeSel.appendChild(o);
+    });
+    modeSel.value = step.mode;
+    modeSel.addEventListener('change', () => { step.mode = modeSel.value; updateCropExpr(); refreshToolPreviews(); });
+
+    const marginRow = document.createElement('div');
+    marginRow.className = 'row';
+    const marginVal = document.createElement('input');
+    marginVal.type = 'number'; marginVal.step = '0.5'; marginVal.value = step.marginVal || 0;
+    marginVal.placeholder = 'Distance';
+    marginVal.title = 'Distance applied to this reference structure before cropping (+ grow / − shrink)';
+    marginVal.addEventListener('input', () => {
+      step.marginVal = parseFloat(marginVal.value) || 0;
+      updateCropExpr();
+      refreshToolPreviews();
+    });
+    const marginUnit = document.createElement('select');
+    marginUnit.style.width = '58px';
+    [['px', 'px'], ['mm', 'mm']].forEach(([v, l]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = l;
+      marginUnit.appendChild(o);
+    });
+    marginUnit.value = step.marginUnit || 'px';
+    marginUnit.addEventListener('change', () => { step.marginUnit = marginUnit.value; updateCropExpr(); refreshToolPreviews(); });
+    marginRow.append(marginVal, marginUnit);
+
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'stepdel'; del.textContent = '✕ Remove step';
+    del.title = 'Remove this step';
+    del.addEventListener('click', () => {
+      cropStepsTouched = true;
+      cropSteps.splice(j, 1);
+      renderCropPanel();
+      refreshToolPreviews();
+    });
+
+    wrap.append(refSel, modeSel, marginRow, del);
+    chainEl.appendChild(wrap);
   });
-  if([...sel.options].some(o => o.value === prev)) sel.value = prev;
-  updateCropMarginConv();
-  $('crop-apply').disabled = !active() || !sel.options.length;
+  updateCropExpr();
+  $('crop-apply').disabled = !active() || !cropSteps.length;
 }
-// Live preview of the reference structure grown/shrunk by the given distance,
-// colored to match the current keep/remove mode (green = keep, red = remove).
+function updateCropExpr(){
+  $('crop-expr').textContent = cropExprString();
+}
+// Live preview of the final result after applying the whole chain to the
+// active structure's current mask (yellow outline, matching Extend/Translate).
 function refreshCropPreview(){
   cropPreview = null;
   const s = active();
-  if(tool !== 'crop' || getRadio('crop-shape') !== 'structure' || !s || !structures.length){
-    updateCropMarginConv();
+  if(tool !== 'crop' || getRadio('crop-shape') !== 'structure' || !s || !cropSteps.length){
     scheduleDraw();
     return;
   }
-  const refIdx = +$('crop-ref').value;
-  const ref = structures[refIdx];
-  if(!ref){ updateCropMarginConv(); scheduleDraw(); return; }
-  const marginPx = cropMarginPx();
-  const region = marginPx ? morphMask(ref.mask, marginPx) : ref.mask;
-  const [r, g, b] = hexToRgb(getRadio('crop-mode') === 'keep' ? '#7cfc7c' : '#ff6b6b');
+  const mask = computeCropChain(s.mask, cropSteps);
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const cx2 = c.getContext('2d');
@@ -1019,24 +1129,23 @@ function refreshCropPreview(){
   for(let y = 0; y < H; y++){
     for(let x = 0; x < W; x++){
       const i = y * W + x;
-      if(!region[i]) continue;
+      if(!mask[i]) continue;
       const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
-                   !region[i - 1] || !region[i + 1] || !region[i - W] || !region[i + W];
+                   !mask[i - 1] || !mask[i + 1] || !mask[i - W] || !mask[i + W];
       if(!edge) continue;
       const o = i * 4;
-      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+      d[o] = 255; d[o + 1] = 238; d[o + 2] = 88; d[o + 3] = 255;
     }
   }
   cx2.putImageData(img, 0, 0);
-  cropPreview = {region, cache: c};
-  updateCropMarginConv();
+  cropPreview = {mask, cache: c};
   scheduleDraw();
 }
 function applyCropFromStructure(){
   const s = active();
   if(!s || !cropPreview) return;
   pushUndo();
-  cropWithRegion(s.mask, cropPreview.region);
+  s.mask = cropPreview.mask;
   s.dirty = true;
   refreshToolPreviews();
   refreshUI();
@@ -1291,117 +1400,201 @@ function draw(){
 }
 
 /* ============================ structure list UI ============================ */
+// Build one structure's row (+ its collapsible ID/Type properties panel).
+function buildStructureRow(i){
+  const s = structures[i];
+  // A fragment (not a wrapping div) so the row and its optional properties
+  // panel become direct children of #structList, same as before grouping —
+  // needed so :last-child/:nth-child keep meaning relative to the list.
+  const wrap = document.createDocumentFragment();
+
+  const row = document.createElement('div');
+  row.className = 'srow' + (i === activeIdx ? ' active' : '') + (multiSelect.has(i) ? ' multisel' : '');
+  row.addEventListener('click', e => clickStructureRow(i, e));
+  row.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    row.classList.add('drag-over');
+  });
+  row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+  row.addEventListener('drop', e => {
+    e.preventDefault();
+    row.classList.remove('drag-over');
+    const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+    if(!Number.isNaN(from)) reorderStructure(from, i);
+  });
+
+  const handle = document.createElement('span');
+  handle.className = 'draghandle';
+  handle.textContent = '⋮⋮';
+  handle.title = 'Drag to reorder';
+  handle.draggable = true;
+  handle.addEventListener('click', e => e.stopPropagation());
+  handle.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', String(i));
+    e.dataTransfer.effectAllowed = 'move';
+    row.classList.add('dragging');
+  });
+  handle.addEventListener('dragend', () => row.classList.remove('dragging'));
+
+  const col = document.createElement('input');
+  col.type = 'color';
+  col.value = s.color;
+  col.title = 'Structure color';
+  col.addEventListener('click', e => e.stopPropagation());
+  col.addEventListener('change', () => {
+    pushUndo();
+    s.color = col.value;
+    s.dirty = true;
+    refreshUI();
+  });
+
+  const nm = document.createElement('span');
+  nm.className = 'nm';
+  nm.textContent = s.name;
+  nm.title = s.name;
+  nm.addEventListener('dblclick', e => {
+    e.stopPropagation();
+    const inp = document.createElement('input');
+    inp.value = s.name;
+    nm.textContent = '';
+    nm.appendChild(inp);
+    inp.focus();
+    inp.select();
+    const commit = () => {
+      const val = inp.value.trim();
+      if(val && val !== s.name){ pushUndo(); s.name = val; }
+      refreshUI();
+    };
+    inp.addEventListener('blur', commit);
+    inp.addEventListener('keydown', ev => {
+      if(ev.key === 'Enter') inp.blur();
+      if(ev.key === 'Escape'){ inp.value = s.name; inp.blur(); }
+    });
+  });
+
+  const props = document.createElement('button');
+  props.className = 'propsbtn';
+  props.textContent = '⚙';
+  props.title = 'Structure properties (ID, type)';
+  props.addEventListener('click', e => {
+    e.stopPropagation();
+    toggleRowProps(i);
+  });
+
+  const eye = document.createElement('button');
+  eye.className = 'eye' + (s.visible ? '' : ' off');
+  eye.textContent = '👁';
+  eye.title = s.visible ? 'Hide' : 'Show';
+  eye.addEventListener('click', e => {
+    e.stopPropagation();
+    pushUndo();
+    s.visible = !s.visible;
+    refreshUI();
+  });
+
+  const del = document.createElement('button');
+  del.className = 'del';
+  del.textContent = '✕';
+  del.title = 'Delete structure';
+  del.addEventListener('click', e => {
+    e.stopPropagation();
+    deleteStructure(i);
+  });
+
+  const up = document.createElement('button');
+  up.className = 'move';
+  up.textContent = '▲';
+  up.title = 'Move up';
+  up.disabled = i === 0;
+  up.addEventListener('click', e => {
+    e.stopPropagation();
+    moveStructure(i, -1);
+  });
+
+  const down = document.createElement('button');
+  down.className = 'move';
+  down.textContent = '▼';
+  down.title = 'Move down';
+  down.disabled = i === structures.length - 1;
+  down.addEventListener('click', e => {
+    e.stopPropagation();
+    moveStructure(i, 1);
+  });
+
+  row.append(handle, col, nm, props, eye, up, down, del);
+  wrap.appendChild(row);
+
+  if(expandedProps.has(i)){
+    const panel = document.createElement('div');
+    panel.className = 'sprops';
+
+    const idLbl = document.createElement('label');
+    idLbl.textContent = 'ID';
+    const idInput = document.createElement('input');
+    idInput.type = 'text';
+    idInput.value = s.id;
+    idInput.addEventListener('click', e => e.stopPropagation());
+    idInput.addEventListener('change', () => {
+      const val = idInput.value.trim();
+      if(val && val !== s.id){ pushUndo(); s.id = val; refreshUI(); }
+    });
+    idLbl.appendChild(idInput);
+
+    const typeLbl = document.createElement('label');
+    typeLbl.textContent = 'Type';
+    const typeSel = document.createElement('select');
+    STRUCTURE_TYPES.forEach(t => {
+      const o = document.createElement('option');
+      o.value = t; o.textContent = t;
+      typeSel.appendChild(o);
+    });
+    typeSel.value = s.type;
+    typeSel.addEventListener('click', e => e.stopPropagation());
+    typeSel.addEventListener('change', () => {
+      pushUndo();
+      s.type = typeSel.value;
+      refreshUI();
+    });
+    typeLbl.appendChild(typeSel);
+
+    panel.append(idLbl, typeLbl);
+    panel.addEventListener('click', e => e.stopPropagation());
+    wrap.appendChild(panel);
+  }
+
+  return wrap;
+}
+// The structure list is a tree grouped by type; each non-empty type group is
+// a collapsible section, rows keep their natural array order within a group.
 function renderList(){
   const list = $('structList');
   list.innerHTML = '';
+  const groups = new Map();
   structures.forEach((s, i) => {
-    const row = document.createElement('div');
-    row.className = 'srow' + (i === activeIdx ? ' active' : '') + (multiSelect.has(i) ? ' multisel' : '');
-    row.addEventListener('click', e => clickStructureRow(i, e));
-    row.addEventListener('dragover', e => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      row.classList.add('drag-over');
-    });
-    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
-    row.addEventListener('drop', e => {
-      e.preventDefault();
-      row.classList.remove('drag-over');
-      const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
-      if(!Number.isNaN(from)) reorderStructure(from, i);
-    });
+    const t = STRUCTURE_TYPES.includes(s.type) ? s.type : 'Other';
+    if(!groups.has(t)) groups.set(t, []);
+    groups.get(t).push(i);
+  });
+  STRUCTURE_TYPES.forEach(t => {
+    const idxs = groups.get(t);
+    if(!idxs || !idxs.length) return;
+    const collapsed = collapsedTypes.has(t);
 
-    const handle = document.createElement('span');
-    handle.className = 'draghandle';
-    handle.textContent = '⋮⋮';
-    handle.title = 'Drag to reorder';
-    handle.draggable = true;
-    handle.addEventListener('click', e => e.stopPropagation());
-    handle.addEventListener('dragstart', e => {
-      e.dataTransfer.setData('text/plain', String(i));
-      e.dataTransfer.effectAllowed = 'move';
-      row.classList.add('dragging');
-    });
-    handle.addEventListener('dragend', () => row.classList.remove('dragging'));
+    const header = document.createElement('div');
+    header.className = 'typegroup-header';
+    header.addEventListener('click', () => toggleTypeCollapse(t));
+    const chevron = document.createElement('span');
+    chevron.className = 'chevron';
+    chevron.textContent = collapsed ? '▸' : '▾';
+    const label = document.createElement('span');
+    label.className = 'typegroup-label';
+    label.textContent = `${t} (${idxs.length})`;
+    header.append(chevron, label);
+    list.appendChild(header);
 
-    const col = document.createElement('input');
-    col.type = 'color';
-    col.value = s.color;
-    col.title = 'Structure color';
-    col.addEventListener('click', e => e.stopPropagation());
-    col.addEventListener('change', () => {
-      pushUndo();
-      s.color = col.value;
-      s.dirty = true;
-      refreshUI();
-    });
-
-    const nm = document.createElement('span');
-    nm.className = 'nm';
-    nm.textContent = s.name;
-    nm.title = s.name;
-    nm.addEventListener('dblclick', e => {
-      e.stopPropagation();
-      const inp = document.createElement('input');
-      inp.value = s.name;
-      nm.textContent = '';
-      nm.appendChild(inp);
-      inp.focus();
-      inp.select();
-      const commit = () => {
-        const val = inp.value.trim();
-        if(val && val !== s.name){ pushUndo(); s.name = val; }
-        refreshUI();
-      };
-      inp.addEventListener('blur', commit);
-      inp.addEventListener('keydown', ev => {
-        if(ev.key === 'Enter') inp.blur();
-        if(ev.key === 'Escape'){ inp.value = s.name; inp.blur(); }
-      });
-    });
-
-    const eye = document.createElement('button');
-    eye.className = 'eye' + (s.visible ? '' : ' off');
-    eye.textContent = '👁';
-    eye.title = s.visible ? 'Hide' : 'Show';
-    eye.addEventListener('click', e => {
-      e.stopPropagation();
-      pushUndo();
-      s.visible = !s.visible;
-      refreshUI();
-    });
-
-    const del = document.createElement('button');
-    del.className = 'del';
-    del.textContent = '✕';
-    del.title = 'Delete structure';
-    del.addEventListener('click', e => {
-      e.stopPropagation();
-      deleteStructure(i);
-    });
-
-    const up = document.createElement('button');
-    up.className = 'move';
-    up.textContent = '▲';
-    up.title = 'Move up';
-    up.disabled = i === 0;
-    up.addEventListener('click', e => {
-      e.stopPropagation();
-      moveStructure(i, -1);
-    });
-
-    const down = document.createElement('button');
-    down.className = 'move';
-    down.textContent = '▼';
-    down.title = 'Move down';
-    down.disabled = i === structures.length - 1;
-    down.addEventListener('click', e => {
-      e.stopPropagation();
-      moveStructure(i, 1);
-    });
-
-    row.append(handle, col, nm, eye, up, down, del);
-    list.appendChild(row);
+    if(collapsed) return;
+    idxs.forEach(i => list.appendChild(buildStructureRow(i)));
   });
 }
 /* ============================ status bar ============================ */
@@ -1616,15 +1809,18 @@ document.querySelectorAll('input[name="shape-kind"]').forEach(r =>
 document.querySelectorAll('input[name="crop-shape"]').forEach(r =>
   r.addEventListener('change', () => {
     const isStruct = getRadio('crop-shape') === 'structure';
+    $('crop-drawn-mode').style.display = isStruct ? 'none' : 'block';
     $('crop-structure-opts').style.display = isStruct ? 'block' : 'none';
-    $('crop-apply').style.display = isStruct ? 'block' : 'none';
     refreshToolPreviews();
   }));
 document.querySelectorAll('input[name="crop-mode"]').forEach(r =>
   r.addEventListener('change', refreshToolPreviews));
-$('crop-ref').addEventListener('change', refreshToolPreviews);
-$('crop-margin-val').addEventListener('input', refreshToolPreviews);
-$('crop-margin-unit').addEventListener('change', refreshToolPreviews);
+$('crop-add-step').addEventListener('click', () => {
+  cropStepsTouched = true;
+  const idx = structures.findIndex((_, i) => i !== activeIdx);
+  cropSteps.push({refIdx: idx >= 0 ? idx : 0, marginVal: 0, marginUnit: 'px', mode: 'keep'});
+  renderCropPanel();
+});
 $('crop-apply').addEventListener('click', applyCropFromStructure);
 $('trans-dx').addEventListener('input', refreshToolPreviews);
 $('trans-dy').addEventListener('input', refreshToolPreviews);
@@ -1722,6 +1918,10 @@ window.__sandbox = {
   get cropPreview(){ return cropPreview; },
   get transPreview(){ return transPreview; },
   get multiSelect(){ return multiSelect; },
+  get collapsedTypes(){ return collapsedTypes; },
+  get expandedProps(){ return expandedProps; },
+  STRUCTURE_TYPES,
+  toggleTypeCollapse, toggleRowProps,
   get structureClipboard(){ return structureClipboard; },
   view,
   setActive, addStructure, deleteStructure, moveStructure, reorderStructure, setTool,
@@ -1730,7 +1930,14 @@ window.__sandbox = {
   stampDisc, stampSegment, translateMask,
   pushUndo, undo, redo,
   refreshExtendPreview, applyExtend,
-  refreshCropPreview, applyCropFromStructure,
+  refreshCropPreview, applyCropFromStructure, computeCropChain,
+  get cropSteps(){ return cropSteps; },
+  setCropChain(steps){
+    cropSteps = steps.map(s => ({...s}));
+    cropStepsTouched = true;
+    renderCropPanel();
+    refreshToolPreviews();
+  },
   refreshTranslatePreview, applyTranslate,
   refreshToolPreviews, zoomBy, panBy, setZoomPct,
   copyActiveStructure, pasteStructure,
