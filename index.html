@@ -67,6 +67,19 @@
   #stage{flex:1; position:relative; min-width:0; background:var(--bg);}
   #stage canvas{position:absolute; inset:0; width:100%; height:100%;
     touch-action:none; cursor:crosshair;}
+  #viewctl{position:absolute; top:10px; right:10px; display:flex; flex-direction:column;
+    gap:4px; z-index:5;}
+  #viewctl button{width:32px; height:32px; background:var(--panel); color:var(--text);
+    border:1px solid var(--border); border-radius:6px; cursor:pointer; font:inherit;
+    font-size:16px; line-height:1;}
+  #viewctl button:hover{border-color:var(--accent); color:var(--accent);}
+  #pandpad{position:absolute; bottom:10px; right:10px; display:grid;
+    grid-template-columns:repeat(3,28px); grid-template-rows:repeat(3,28px); gap:2px; z-index:5;}
+  #pandpad button{background:var(--panel); color:var(--text); border:1px solid var(--border);
+    border-radius:4px; cursor:pointer; font:inherit;}
+  #pandpad button:hover{border-color:var(--accent); color:var(--accent);}
+  #pandpad .padctr{display:flex; align-items:center; justify-content:center;
+    color:var(--dim); font-size:12px;}
 
   /* right structure list */
   #side{width:230px; background:var(--panel); border-left:1px solid var(--border);
@@ -118,6 +131,7 @@
       <button data-tool="crop">Crop</button>
       <button data-tool="boolean">Boolean</button>
       <button data-tool="extend">Extend</button>
+      <button data-tool="translate">Translate</button>
     </div>
     <div class="histbtns">
       <button id="undoBtn" title="Ctrl+Z">Undo</button>
@@ -169,9 +183,25 @@
       <div class="grouplbl">Shape</div>
       <label><input type="radio" name="crop-shape" value="rect" checked> Rectangle</label>
       <label><input type="radio" name="crop-shape" value="free"> Freehand</label>
+      <label><input type="radio" name="crop-shape" value="structure"> Another structure</label>
+      <div id="crop-structure-opts" style="display:none">
+        <div class="grouplbl">Reference structure</div>
+        <select id="crop-ref"></select>
+        <div class="grouplbl">Distance (+ grow / − shrink)</div>
+        <div class="row">
+          <input type="number" id="crop-margin-val" value="0" step="0.5">
+          <select id="crop-margin-unit" style="width:58px">
+            <option value="px">px</option>
+            <option value="mm">mm</option>
+          </select>
+        </div>
+        <div class="hint" id="crop-margin-conv"></div>
+      </div>
       <div class="grouplbl">Mode</div>
       <label><input type="radio" name="crop-mode" value="keep" checked> Keep inside</label>
       <label><input type="radio" name="crop-mode" value="remove"> Remove inside</label>
+      <button class="apply" id="crop-apply" style="display:none">Apply</button>
+      <div class="hint">Rectangle/Freehand: drag on canvas. Another structure: pick a reference and distance, then Apply — preview shown in cyan.</div>
     </div>
 
     <div class="panel" id="set-boolean">
@@ -181,6 +211,7 @@
       <div class="grouplbl">Chain</div>
       <div id="bool-chain"></div>
       <button type="button" class="apply" id="bool-add-step" style="background:var(--panel2); color:var(--text); border-color:var(--border);">+ Add step</button>
+      <div class="hint">Each step's distance (+ grow / − shrink) is applied to that structure before combining.</div>
       <div class="hint" id="bool-expr"></div>
       <div class="grouplbl">Output</div>
       <label><input type="radio" name="bool-out" value="existing" checked> Save to existing structure</label>
@@ -205,11 +236,40 @@
       <div class="hint">Preview outline shown in yellow. Scale: 0.5 mm/px.</div>
     </div>
 
+    <div class="panel" id="set-translate">
+      <h3>Translate</h3>
+      <div class="grouplbl">Offset (+X right, +Y down)</div>
+      <div class="row">
+        <input type="number" id="trans-dx" value="0" step="0.5" placeholder="dX">
+        <input type="number" id="trans-dy" value="0" step="0.5" placeholder="dY">
+        <select id="trans-unit" style="width:58px">
+          <option value="px">px</option>
+          <option value="mm">mm</option>
+        </select>
+      </div>
+      <div class="hint" id="trans-conv"></div>
+      <button class="apply" id="trans-apply">Apply</button>
+      <div class="hint">Shifts the whole structure. Preview outline shown in yellow. Pixels pushed past the canvas edge are clipped.</div>
+    </div>
+
     <div id="navhint">Wheel: zoom &middot; Space/middle-drag: pan<br>
+      On-canvas +/− and arrow controls also zoom/pan.<br>
       Ctrl+Z / Ctrl+Y: undo / redo<br>Double-click a name to rename.</div>
   </div>
 
-  <div id="stage"><canvas id="cv"></canvas></div>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="viewctl">
+      <button id="zoomInBtn" title="Zoom in">+</button>
+      <button id="zoomFitBtn" title="Fit to view">&#10530;</button>
+      <button id="zoomOutBtn" title="Zoom out">&minus;</button>
+    </div>
+    <div id="pandpad">
+      <span></span><button id="panUpBtn" title="Pan up">&uarr;</button><span></span>
+      <button id="panLeftBtn" title="Pan left">&larr;</button><span class="padctr">&#10021;</span><button id="panRightBtn" title="Pan right">&rarr;</button>
+      <span></span><button id="panDownBtn" title="Pan down">&darr;</button><span></span>
+    </div>
+  </div>
 
   <div id="side">
     <div class="hdr"><h2>Structures</h2><button id="addStruct">+ Add</button></div>
@@ -247,6 +307,8 @@ let drag = null;                 // current pointer drag descriptor
 let spaceDown = false;
 let cursorPos = null;            // last pointer pos in mask coords (float)
 let extPreview = null;           // {mask, cache} live Extend preview
+let cropPreview = null;          // {region, cache} live Crop-to-structure preview
+let transPreview = null;         // {mask, cache} live Translate preview
 
 const $ = id => document.getElementById(id);
 const stage = $('stage'), cv = $('cv'), ctx = cv.getContext('2d');
@@ -286,7 +348,7 @@ function deleteStructure(i){
   pushUndo();
   structures.splice(i, 1);
   if(activeIdx >= structures.length) activeIdx = structures.length - 1;
-  refreshExtendPreview();
+  refreshToolPreviews();
   refreshUI();
 }
 function setActive(i){
@@ -295,7 +357,7 @@ function setActive(i){
   // ever recognizing two clicks on a name as a dblclick (needed to rename).
   if(i === activeIdx) return;
   activeIdx = i;
-  refreshExtendPreview();
+  refreshToolPreviews();
   refreshUI();
 }
 // Reorder structures (also changes draw/stacking order: later = drawn on top).
@@ -372,14 +434,14 @@ function undo(){
   if(!undoStack.length) return;
   redoStack.push(snapshot());
   restore(undoStack.pop());
-  refreshExtendPreview();
+  refreshToolPreviews();
   refreshUI();
 }
 function redo(){
   if(!redoStack.length) return;
   undoStack.push(snapshot());
   restore(redoStack.pop());
-  refreshExtendPreview();
+  refreshToolPreviews();
   refreshUI();
 }
 function refreshHistBtns(){
@@ -561,10 +623,20 @@ function combineMasks(a, b, op){
   }
   return out;
 }
+// Distance (margin) applied to a step's operand structure before combining
+// (+ grow / − shrink), e.g. "PTV = CTV union Bladder[+5mm]".
+function stepMarginPx(step){
+  const v = step.marginVal || 0;
+  return step.marginUnit === 'mm' ? v * PX_PER_MM : v;
+}
 // Evaluate the chain left-to-right: ((structures[startIdx] op0 s[steps[0].idx]) op1 s[steps[1].idx]) ...
 function computeBooleanChain(startIdx, steps){
   let result = new Uint8Array(structures[startIdx].mask);
-  for(const step of steps) result = combineMasks(result, structures[step.idx].mask, step.op);
+  for(const step of steps){
+    const mPx = stepMarginPx(step);
+    const operand = mPx ? morphMask(structures[step.idx].mask, mPx) : structures[step.idx].mask;
+    result = combineMasks(result, operand, step.op);
+  }
   return result;
 }
 function boolExprString(){
@@ -572,7 +644,9 @@ function boolExprString(){
   let expr = structures[boolStart].name;
   for(const step of boolSteps){
     const s = structures[step.idx];
-    expr += ` ${BOOL_SYM[step.op]} ${s ? s.name : '?'}`;
+    const mPx = stepMarginPx(step);
+    const tag = mPx !== 0 ? `[${mPx > 0 ? '+' : ''}${step.marginVal}${step.marginUnit || 'px'}]` : '';
+    expr += ` ${BOOL_SYM[step.op]} ${s ? s.name : '?'}${tag}`;
   }
   return expr;
 }
@@ -584,7 +658,7 @@ function ensureBoolDefaults(){
   for(const st of boolSteps) if(st.idx >= structures.length) st.idx = 0;
   if(!boolStepsTouched && boolSteps.length === 0 && structures.length >= 2){
     const idx = structures.findIndex((_, i) => i !== boolStart);
-    boolSteps.push({op: 'union', idx: idx >= 0 ? idx : 0});
+    boolSteps.push({op: 'union', idx: idx >= 0 ? idx : 0, marginVal: 0, marginUnit: 'px'});
   }
 }
 function renderBooleanPanel(){
@@ -623,6 +697,27 @@ function renderBooleanPanel(){
     structSel.value = step.idx;
     structSel.addEventListener('change', () => { step.idx = +structSel.value; updateBoolExpr(); });
 
+    const marginRow = document.createElement('div');
+    marginRow.className = 'row';
+    const marginVal = document.createElement('input');
+    marginVal.type = 'number'; marginVal.step = '0.5'; marginVal.value = step.marginVal || 0;
+    marginVal.placeholder = 'Distance';
+    marginVal.title = 'Distance applied to this structure before combining (+ grow / − shrink)';
+    marginVal.addEventListener('input', () => {
+      step.marginVal = parseFloat(marginVal.value) || 0;
+      updateBoolExpr();
+    });
+    const marginUnit = document.createElement('select');
+    marginUnit.style.width = '58px';
+    [['px', 'px'], ['mm', 'mm']].forEach(([v, l]) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = l;
+      marginUnit.appendChild(o);
+    });
+    marginUnit.value = step.marginUnit || 'px';
+    marginUnit.addEventListener('change', () => { step.marginUnit = marginUnit.value; updateBoolExpr(); });
+    marginRow.append(marginVal, marginUnit);
+
     const del = document.createElement('button');
     del.type = 'button'; del.className = 'stepdel'; del.textContent = '✕ Remove step';
     del.title = 'Remove this step';
@@ -632,7 +727,7 @@ function renderBooleanPanel(){
       renderBooleanPanel();
     });
 
-    wrap.append(opSel, structSel, del);
+    wrap.append(opSel, structSel, marginRow, del);
     chainEl.appendChild(wrap);
   });
 
@@ -669,7 +764,7 @@ function applyBooleanChain(){
     structures[outIdx].dirty = true;
     activeIdx = outIdx;
   }
-  refreshExtendPreview();
+  refreshToolPreviews();
   refreshUI();
 }
 
@@ -719,8 +814,157 @@ function applyExtend(){
   pushUndo();
   s.mask = extPreview.mask;
   s.dirty = true;
-  refreshExtendPreview();
+  refreshToolPreviews();
   refreshUI();
+}
+
+/* ============================ crop-to-structure ============================ */
+function cropMarginPx(){
+  const v = parseFloat($('crop-margin-val').value) || 0;
+  return $('crop-margin-unit').value === 'mm' ? v * PX_PER_MM : v;
+}
+function updateCropMarginConv(){
+  const v = parseFloat($('crop-margin-val').value) || 0;
+  const px = cropMarginPx();
+  $('crop-margin-conv').textContent = $('crop-margin-unit').value === 'mm'
+    ? `= ${px} px` : `= ${(v / PX_PER_MM).toFixed(1)} mm`;
+}
+function renderCropPanel(){
+  const sel = $('crop-ref');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  structures.forEach((s, i) => {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = s.name;
+    sel.appendChild(o);
+  });
+  if([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  updateCropMarginConv();
+  $('crop-apply').disabled = !active() || !sel.options.length;
+}
+// Live preview of the reference structure grown/shrunk by the given distance,
+// colored to match the current keep/remove mode (green = keep, red = remove).
+function refreshCropPreview(){
+  cropPreview = null;
+  const s = active();
+  if(tool !== 'crop' || getRadio('crop-shape') !== 'structure' || !s || !structures.length){
+    updateCropMarginConv();
+    scheduleDraw();
+    return;
+  }
+  const refIdx = +$('crop-ref').value;
+  const ref = structures[refIdx];
+  if(!ref){ updateCropMarginConv(); scheduleDraw(); return; }
+  const marginPx = cropMarginPx();
+  const region = marginPx ? morphMask(ref.mask, marginPx) : ref.mask;
+  const [r, g, b] = hexToRgb(getRadio('crop-mode') === 'keep' ? '#7cfc7c' : '#ff6b6b');
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const cx2 = c.getContext('2d');
+  const img = cx2.createImageData(W, H);
+  const d = img.data;
+  for(let y = 0; y < H; y++){
+    for(let x = 0; x < W; x++){
+      const i = y * W + x;
+      if(!region[i]) continue;
+      const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
+                   !region[i - 1] || !region[i + 1] || !region[i - W] || !region[i + W];
+      if(!edge) continue;
+      const o = i * 4;
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+    }
+  }
+  cx2.putImageData(img, 0, 0);
+  cropPreview = {region, cache: c};
+  updateCropMarginConv();
+  scheduleDraw();
+}
+function applyCropFromStructure(){
+  const s = active();
+  if(!s || !cropPreview) return;
+  pushUndo();
+  cropWithRegion(s.mask, cropPreview.region);
+  s.dirty = true;
+  refreshToolPreviews();
+  refreshUI();
+}
+
+/* ============================ translate ============================ */
+function transOffsetPx(){
+  const dx = parseFloat($('trans-dx').value) || 0;
+  const dy = parseFloat($('trans-dy').value) || 0;
+  const mul = $('trans-unit').value === 'mm' ? PX_PER_MM : 1;
+  return [dx * mul, dy * mul];
+}
+// Shift every set pixel by (dx,dy), rounded to the nearest whole pixel;
+// pixels pushed past the W×H grid are clipped (dropped), not wrapped.
+function translateMask(mask, dx, dy){
+  dx = Math.round(dx); dy = Math.round(dy);
+  const out = new Uint8Array(W * H);
+  if(dx === 0 && dy === 0){ out.set(mask); return out; }
+  for(let y = 0; y < H; y++){
+    const ny = y + dy;
+    if(ny < 0 || ny >= H) continue;
+    const srcRow = y * W, dstRow = ny * W;
+    for(let x = 0; x < W; x++){
+      if(!mask[srcRow + x]) continue;
+      const nx = x + dx;
+      if(nx < 0 || nx >= W) continue;
+      out[dstRow + nx] = 1;
+    }
+  }
+  return out;
+}
+function refreshTranslatePreview(){
+  transPreview = null;
+  const s = active();
+  const [dx, dy] = transOffsetPx();
+  if(tool !== 'translate' || !s || (dx === 0 && dy === 0)){ updateTransConv(); scheduleDraw(); return; }
+  const mask = translateMask(s.mask, dx, dy);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const cx2 = c.getContext('2d');
+  const img = cx2.createImageData(W, H);
+  const d = img.data;
+  for(let y = 0; y < H; y++){
+    for(let x = 0; x < W; x++){
+      const i = y * W + x;
+      if(!mask[i]) continue;
+      const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
+                   !mask[i - 1] || !mask[i + 1] || !mask[i - W] || !mask[i + W];
+      if(!edge) continue;
+      const o = i * 4;
+      d[o] = 255; d[o + 1] = 238; d[o + 2] = 88; d[o + 3] = 255;
+    }
+  }
+  cx2.putImageData(img, 0, 0);
+  transPreview = {mask, cache: c};
+  updateTransConv();
+  scheduleDraw();
+}
+function updateTransConv(){
+  const dx = parseFloat($('trans-dx').value) || 0;
+  const dy = parseFloat($('trans-dy').value) || 0;
+  const [pxDx, pxDy] = transOffsetPx();
+  $('trans-conv').textContent = $('trans-unit').value === 'mm'
+    ? `= ${pxDx} px, ${pxDy} px` : `= ${(dx / PX_PER_MM).toFixed(1)} mm, ${(dy / PX_PER_MM).toFixed(1)} mm`;
+  $('trans-apply').disabled = !active() || (dx === 0 && dy === 0);
+}
+function applyTranslate(){
+  const s = active();
+  if(!s || !transPreview) return;
+  pushUndo();
+  s.mask = transPreview.mask;
+  s.dirty = true;
+  refreshToolPreviews();
+  refreshUI();
+}
+
+/* ============================ shared tool-preview refresh ============================ */
+function refreshToolPreviews(){
+  refreshExtendPreview();
+  refreshCropPreview();
+  refreshTranslatePreview();
 }
 
 /* ============================ view / coordinates ============================ */
@@ -772,6 +1016,8 @@ function draw(){
     ctx.drawImage(s.cache, 0, 0);
   }
   if(tool === 'extend' && extPreview) ctx.drawImage(extPreview.cache, 0, 0);
+  if(tool === 'crop' && cropPreview) ctx.drawImage(cropPreview.cache, 0, 0);
+  if(tool === 'translate' && transPreview) ctx.drawImage(transPreview.cache, 0, 0);
 
   // overlays in screen space
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -960,7 +1206,7 @@ function renderList(){
 }
 /* ============================ status bar ============================ */
 const TOOL_NAMES = {pencil:'Pencil', shape:'Shape', brush:'Brush', eraser:'Eraser',
-                    crop:'Crop', boolean:'Boolean', extend:'Extend'};
+                    crop:'Crop', boolean:'Boolean', extend:'Extend', translate:'Translate'};
 function updateStatus(){
   $('st-tool').textContent = TOOL_NAMES[tool];
   $('st-struct').textContent = active() ? active().name : 'none';
@@ -975,6 +1221,7 @@ function refreshUI(){
   for(const s of structures) s.dirty = true;   // cheap: caches rebuilt lazily on draw
   renderList();
   renderBooleanPanel();
+  renderCropPanel();
   refreshHistBtns();
   updateExtConv();
   updateStatus();
@@ -989,7 +1236,7 @@ function setTool(t){
     b.classList.toggle('sel', b.dataset.tool === t));
   document.querySelectorAll('.panel').forEach(p =>
     p.classList.toggle('show', p.id === 'set-' + t));
-  refreshExtendPreview();
+  refreshToolPreviews();
   updateStatus();
   scheduleDraw();
 }
@@ -1027,10 +1274,10 @@ cv.addEventListener('pointerdown', e => {
     s.dirty = true;
     drag = {kind: 'stroke', last: [mx, my], d, val};
   }else if(tool === 'crop'){
-    if(getRadio('crop-shape') === 'rect')
-      drag = {kind: 'croprect', p0: [mx, my], p1: [mx, my]};
-    else
-      drag = {kind: 'cropfree', pts: [[mx, my]]};
+    const cshape = getRadio('crop-shape');
+    if(cshape === 'rect') drag = {kind: 'croprect', p0: [mx, my], p1: [mx, my]};
+    else if(cshape === 'free') drag = {kind: 'cropfree', pts: [[mx, my]]};
+    // 'structure' shape: no drag; uses the reference structure + Apply button
   }else if(tool === 'shape'){
     drag = {kind: 'shape', p0: [mx, my], p1: [mx, my]};
   }
@@ -1101,7 +1348,7 @@ cv.addEventListener('pointerup', e => {
     applyRegion(s.mask, region, getRadio('shape-mode') === 'add');
     s.dirty = true;
   }
-  refreshExtendPreview();
+  refreshToolPreviews();
   scheduleDraw();
 });
 // keep: mask &= region;  remove: mask &= ~region
@@ -1114,16 +1361,24 @@ function cropWithRegion(mask, region){
 
 cv.addEventListener('pointerleave', () => { cursorPos = null; updateStatus(); scheduleDraw(); });
 
-cv.addEventListener('wheel', e => {
-  e.preventDefault();
-  const [sx, sy] = eventPos(e);
-  const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+// Zoom keeping (cx,cy) (screen coords) fixed under the cursor/center.
+function zoomBy(factor, cx, cy){
   const ns = Math.min(40, Math.max(0.1, view.scale * factor));
-  view.tx = sx - (sx - view.tx) * (ns / view.scale);
-  view.ty = sy - (sy - view.ty) * (ns / view.scale);
+  view.tx = cx - (cx - view.tx) * (ns / view.scale);
+  view.ty = cy - (cy - view.ty) * (ns / view.scale);
   view.scale = ns;
   updateStatus();
   scheduleDraw();
+}
+function panBy(dx, dy){
+  view.tx += dx; view.ty += dy;
+  updateStatus();
+  scheduleDraw();
+}
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const [sx, sy] = eventPos(e);
+  zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1, sx, sy);
 }, {passive: false});
 
 /* ============================ keyboard ============================ */
@@ -1154,6 +1409,37 @@ document.querySelectorAll('input[name="shape-kind"]').forEach(r =>
     $('shape-sides-row').style.display = getRadio('shape-kind') === 'polygon' ? 'block' : 'none';
     scheduleDraw();
   }));
+document.querySelectorAll('input[name="crop-shape"]').forEach(r =>
+  r.addEventListener('change', () => {
+    const isStruct = getRadio('crop-shape') === 'structure';
+    $('crop-structure-opts').style.display = isStruct ? 'block' : 'none';
+    $('crop-apply').style.display = isStruct ? 'block' : 'none';
+    refreshToolPreviews();
+  }));
+document.querySelectorAll('input[name="crop-mode"]').forEach(r =>
+  r.addEventListener('change', refreshToolPreviews));
+$('crop-ref').addEventListener('change', refreshToolPreviews);
+$('crop-margin-val').addEventListener('input', refreshToolPreviews);
+$('crop-margin-unit').addEventListener('change', refreshToolPreviews);
+$('crop-apply').addEventListener('click', applyCropFromStructure);
+$('trans-dx').addEventListener('input', refreshToolPreviews);
+$('trans-dy').addEventListener('input', refreshToolPreviews);
+$('trans-unit').addEventListener('change', refreshToolPreviews);
+$('trans-apply').addEventListener('click', applyTranslate);
+$('zoomInBtn').addEventListener('click', () => {
+  const [cw, ch] = cssSize();
+  zoomBy(1.25, cw / 2, ch / 2);
+});
+$('zoomOutBtn').addEventListener('click', () => {
+  const [cw, ch] = cssSize();
+  zoomBy(1 / 1.25, cw / 2, ch / 2);
+});
+$('zoomFitBtn').addEventListener('click', fitView);
+const PAN_STEP = 60;
+$('panUpBtn').addEventListener('click', () => panBy(0, -PAN_STEP));
+$('panDownBtn').addEventListener('click', () => panBy(0, PAN_STEP));
+$('panLeftBtn').addEventListener('click', () => panBy(-PAN_STEP, 0));
+$('panRightBtn').addEventListener('click', () => panBy(PAN_STEP, 0));
 $('bool-start').addEventListener('change', () => {
   boolStart = +$('bool-start').value;
   updateBoolExpr();
@@ -1161,7 +1447,7 @@ $('bool-start').addEventListener('change', () => {
 $('bool-add-step').addEventListener('click', () => {
   boolStepsTouched = true;
   const idx = structures.findIndex((_, i) => i !== boolStart);
-  boolSteps.push({op: 'union', idx: idx >= 0 ? idx : 0});
+  boolSteps.push({op: 'union', idx: idx >= 0 ? idx : 0, marginVal: 0, marginUnit: 'px'});
   renderBooleanPanel();
 });
 document.querySelectorAll('input[name="bool-out"]').forEach(r =>
@@ -1202,13 +1488,18 @@ window.__sandbox = {
     boolStepsTouched = true;
     renderBooleanPanel();
   },
+  get cropPreview(){ return cropPreview; },
+  get transPreview(){ return transPreview; },
   view,
   setActive, addStructure, deleteStructure, moveStructure, reorderStructure, setTool,
   computeBooleanChain, applyBooleanChain,
   morphMask, polygonRegion, rectRegion, shapeRegion, applyRegion,
-  stampDisc, stampSegment,
+  stampDisc, stampSegment, translateMask,
   pushUndo, undo, redo,
-  refreshExtendPreview, applyExtend, refreshUI
+  refreshExtendPreview, applyExtend,
+  refreshCropPreview, applyCropFromStructure,
+  refreshTranslatePreview, applyTranslate,
+  refreshToolPreviews, zoomBy, panBy, refreshUI
 };
 </script>
 </body>
