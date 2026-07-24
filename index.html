@@ -17,6 +17,9 @@
     user-select:none; overflow:hidden;
   }
   #main{flex:1; display:flex; min-height:0;}
+  /* center column: top toolbar sits only above the canvas, so the left/right
+     sidebars (siblings of this column) run the full height, flush to the top */
+  #centercol{flex:1; display:flex; flex-direction:column; min-width:0; min-height:0;}
 
   /* top toolbar: history / view / export controls, separate from the
      drawing-tool palette in the left sidebar */
@@ -33,6 +36,8 @@
   #topbar select{background:var(--panel2); color:var(--text); border:1px solid var(--border);
     border-radius:4px; padding:4px; font:inherit;}
   #topbar input[type=range]{width:110px;}
+  #zoomControls{display:flex; align-items:center; gap:6px;}
+  #zoomToggleBtn.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
 
   /* left toolbar + settings */
   #toolbar{
@@ -142,34 +147,6 @@
 </style>
 </head>
 <body>
-<div id="topbar">
-  <div class="topgroup">
-    <span class="glabel">History</span>
-    <button id="undoBtn" title="Ctrl+Z">Undo</button>
-    <button id="redoBtn" title="Ctrl+Y">Redo</button>
-  </div>
-  <div class="topgroup">
-    <span class="glabel">View</span>
-    <button id="fitBtn" title="Fit canvas to view">Fit</button>
-    <select id="zoomPreset">
-      <option value="" selected disabled>Zoom to&hellip;</option>
-      <option value="25">25%</option>
-      <option value="50">50%</option>
-      <option value="100">100%</option>
-      <option value="150">150%</option>
-      <option value="200">200%</option>
-      <option value="400">400%</option>
-      <option value="fit">Fit</option>
-    </select>
-    <input type="range" id="zoomSlider" min="10" max="400" step="5" value="100">
-    <button id="resetViewBtn">Reset view</button>
-  </div>
-  <div class="topgroup">
-    <span class="glabel">Export</span>
-    <button id="exportPngBtn">PNG</button>
-    <button id="exportJsonBtn">JSON</button>
-  </div>
-</div>
 <div id="main">
   <div id="toolbar">
     <h2>Tools</h2>
@@ -302,17 +279,51 @@
       Ctrl+Z / Ctrl+Y: undo / redo<br>Double-click a name to rename.</div>
   </div>
 
-  <div id="stage">
-    <canvas id="cv"></canvas>
-    <div id="viewctl">
-      <button id="zoomInBtn" title="Zoom in">+</button>
-      <button id="zoomFitBtn" title="Fit to view">&#10530;</button>
-      <button id="zoomOutBtn" title="Zoom out">&minus;</button>
+  <div id="centercol">
+    <div id="topbar">
+      <div class="topgroup">
+        <span class="glabel">History</span>
+        <button id="undoBtn" title="Ctrl+Z">Undo</button>
+        <button id="redoBtn" title="Ctrl+Y">Redo</button>
+      </div>
+      <div class="topgroup">
+        <span class="glabel">View</span>
+        <button id="fitBtn" title="Fit canvas to view">Fit</button>
+        <button id="zoomToggleBtn" title="Show/hide zoom controls" aria-expanded="false">Zoom</button>
+        <span id="zoomControls" style="display:none">
+          <select id="zoomPreset">
+            <option value="" selected disabled>Zoom to&hellip;</option>
+            <option value="25">25%</option>
+            <option value="50">50%</option>
+            <option value="100">100%</option>
+            <option value="150">150%</option>
+            <option value="200">200%</option>
+            <option value="400">400%</option>
+            <option value="fit">Fit</option>
+          </select>
+          <input type="range" id="zoomSlider" min="10" max="400" step="5" value="100">
+          <button id="resetViewBtn">Reset view</button>
+        </span>
+      </div>
+      <div class="topgroup">
+        <span class="glabel">Export</span>
+        <button id="exportPngBtn">PNG</button>
+        <button id="exportJsonBtn">JSON</button>
+      </div>
     </div>
-    <div id="pandpad">
-      <span></span><button id="panUpBtn" title="Pan up">&uarr;</button><span></span>
-      <button id="panLeftBtn" title="Pan left">&larr;</button><span class="padctr">&#10021;</span><button id="panRightBtn" title="Pan right">&rarr;</button>
-      <span></span><button id="panDownBtn" title="Pan down">&darr;</button><span></span>
+
+    <div id="stage">
+      <canvas id="cv"></canvas>
+      <div id="viewctl">
+        <button id="zoomInBtn" title="Zoom in">+</button>
+        <button id="zoomFitBtn" title="Fit to view">&#10530;</button>
+        <button id="zoomOutBtn" title="Zoom out">&minus;</button>
+      </div>
+      <div id="pandpad">
+        <span></span><button id="panUpBtn" title="Pan up">&uarr;</button><span></span>
+        <button id="panLeftBtn" title="Pan left">&larr;</button><span class="padctr">&#10021;</span><button id="panRightBtn" title="Pan right">&rarr;</button>
+        <span></span><button id="panDownBtn" title="Pan down">&darr;</button><span></span>
+      </div>
     </div>
   </div>
 
@@ -1628,6 +1639,12 @@ $('zoomOutBtn').addEventListener('click', () => {
   zoomBy(1 / 1.25, cw / 2, ch / 2);
 });
 $('zoomFitBtn').addEventListener('click', fitView);
+$('zoomToggleBtn').addEventListener('click', () => {
+  const open = $('zoomControls').style.display === 'none';
+  $('zoomControls').style.display = open ? 'flex' : 'none';
+  $('zoomToggleBtn').classList.toggle('sel', open);
+  $('zoomToggleBtn').setAttribute('aria-expanded', String(open));
+});
 const PAN_STEP = 60;
 $('panUpBtn').addEventListener('click', () => panBy(0, -PAN_STEP));
 $('panDownBtn').addEventListener('click', () => panBy(0, PAN_STEP));
