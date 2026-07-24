@@ -322,6 +322,15 @@
         <button id="exportPngBtn">PNG</button>
         <button id="exportJsonBtn">JSON</button>
       </div>
+      <div class="topgroup">
+        <span class="glabel">Background</span>
+        <button id="uploadImageBtn">Image&hellip;</button>
+        <button id="uploadDicomBtn">DICOM&hellip;</button>
+        <button id="bgToggleBtn" disabled>Hide</button>
+        <button id="bgClearBtn" disabled>Clear</button>
+        <input type="file" id="imageFileInput" accept="image/*" style="display:none">
+        <input type="file" id="dicomFileInput" accept=".dcm,application/dicom" style="display:none">
+      </div>
     </div>
 
     <div id="stage">
@@ -392,6 +401,8 @@ let cursorPos = null;            // last pointer pos in mask coords (float)
 let extPreview = null;           // {mask, cache} live Extend preview
 let cropPreview = null;          // {region, cache} live Crop-to-structure preview
 let transPreview = null;         // {mask, cache} live Translate preview
+let backgroundCanvas = null;     // W×H offscreen canvas: uploaded image/DICOM reference layer
+let backgroundVisible = true;
 
 const $ = id => document.getElementById(id);
 const stage = $('stage'), cv = $('cv'), ctx = cv.getContext('2d');
@@ -1276,6 +1287,206 @@ function exportJSON(){
   downloadBlob(new Blob([JSON.stringify(data)], {type: 'application/json'}), 'contours.json');
 }
 
+/* ============================ background reference layer (image / DICOM) ============================ */
+// The uploaded image is purely a visual reference to trace over — it is
+// scaled ("contain", letterboxed) into a W×H canvas independent of the
+// structures' own coordinate grid, and never affects any mask math.
+function setBackgroundFromImageLike(imgLike, iw, ih){
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const cx = c.getContext('2d');
+  const scale = Math.min(W / iw, H / ih);
+  const dw = iw * scale, dh = ih * scale;
+  const dx = (W - dw) / 2, dy = (H - dh) / 2;
+  cx.fillStyle = '#000';
+  cx.fillRect(0, 0, W, H);
+  cx.drawImage(imgLike, dx, dy, dw, dh);
+  backgroundCanvas = c;
+  backgroundVisible = true;
+  updateBackgroundButtons();
+  scheduleDraw();
+}
+function updateBackgroundButtons(){
+  const has = !!backgroundCanvas;
+  $('bgToggleBtn').disabled = !has;
+  $('bgClearBtn').disabled = !has;
+  $('bgToggleBtn').textContent = backgroundVisible ? 'Hide' : 'Show';
+}
+function loadImageFile(file){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('unsupported or corrupt image file')); };
+    img.src = url;
+  });
+}
+
+/* --- minimal DICOM parser: uncompressed Explicit/Implicit VR Little Endian only ---
+   Reads just enough of the dataset to render PixelData as a grayscale (or RGB)
+   preview: Rows/Columns/BitsAllocated/PixelRepresentation/SamplesPerPixel/
+   PhotometricInterpretation, Rescale/Window tags, and the PixelData bytes.
+   Compressed transfer syntaxes (JPEG/JPEG2000/RLE) are explicitly rejected —
+   decoding those needs a real codec, out of scope for a dependency-free parser. */
+const DICOM_TRANSFER_SYNTAXES = {
+  '1.2.840.10008.1.2': 'implicit-le',
+  '1.2.840.10008.1.2.1': 'explicit-le',
+  '1.2.840.10008.1.2.2': 'explicit-be',
+};
+const DICOM_IMPLICIT_VR = {
+  '0028,0002': 'US', '0028,0004': 'CS', '0028,0010': 'US', '0028,0011': 'US',
+  '0028,0100': 'US', '0028,0103': 'US',
+  '0028,1050': 'DS', '0028,1051': 'DS', '0028,1052': 'DS', '0028,1053': 'DS',
+  '7FE0,0010': 'OW',
+};
+function dicomReadCString(view, offset, length){
+  let s = '';
+  for(let i = 0; i < length; i++){
+    const c = view.getUint8(offset + i);
+    if(c === 0) break;
+    s += String.fromCharCode(c);
+  }
+  return s.trim();
+}
+function dicomKey(group, element){
+  return group.toString(16).padStart(4, '0').toUpperCase() + ',' + element.toString(16).padStart(4, '0').toUpperCase();
+}
+function parseDicom(buffer){
+  const view = new DataView(buffer);
+  if(buffer.byteLength < 132) throw new Error('file too small to be DICOM');
+
+  let offset = dicomReadCString(view, 128, 4) === 'DICM' ? 132 : 0;
+
+  // File Meta group (0002,xxxx) is always Explicit VR Little Endian and
+  // carries the Transfer Syntax UID that governs the rest of the dataset.
+  let transferSyntaxUID = '1.2.840.10008.1.2.1';
+  let p = offset;
+  if(p + 8 <= buffer.byteLength && view.getUint16(p, true) === 0x0002){
+    while(p + 8 <= buffer.byteLength && view.getUint16(p, true) === 0x0002){
+      const group = view.getUint16(p, true), element = view.getUint16(p + 2, true);
+      const vr = String.fromCharCode(view.getUint8(p + 4), view.getUint8(p + 5));
+      let length, valueOffset;
+      if(['OB', 'OW', 'OF', 'SQ', 'UT', 'UN'].includes(vr)){
+        length = view.getUint32(p + 8, true); valueOffset = p + 12;
+      }else{
+        length = view.getUint16(p + 6, true); valueOffset = p + 8;
+      }
+      if(element === 0x0010) transferSyntaxUID = dicomReadCString(view, valueOffset, length);
+      p = valueOffset + length + (length % 2);
+    }
+  }
+  const syntax = DICOM_TRANSFER_SYNTAXES[transferSyntaxUID];
+  if(!syntax){
+    throw new Error(`unsupported transfer syntax (${transferSyntaxUID || 'unknown'}) — likely compressed ` +
+      `(JPEG/JPEG2000/RLE); this offline viewer only supports uncompressed DICOM`);
+  }
+  if(syntax === 'explicit-be') throw new Error('Explicit VR Big Endian DICOM is not supported');
+  const implicit = syntax === 'implicit-le';
+
+  const tags = {};
+  let pixelDataBytes = null;
+  while(p + 8 <= buffer.byteLength){
+    const group = view.getUint16(p, true), element = view.getUint16(p + 2, true);
+    let vr, length, valueOffset;
+    if(implicit){
+      vr = DICOM_IMPLICIT_VR[dicomKey(group, element)] || 'UN';
+      length = view.getUint32(p + 4, true);
+      valueOffset = p + 8;
+    }else{
+      vr = String.fromCharCode(view.getUint8(p + 4), view.getUint8(p + 5));
+      if(['OB', 'OW', 'OF', 'SQ', 'UT', 'UN'].includes(vr)){
+        length = view.getUint32(p + 8, true); valueOffset = p + 12;
+      }else{
+        length = view.getUint16(p + 6, true); valueOffset = p + 8;
+      }
+    }
+    if(length === 0xFFFFFFFF){
+      throw new Error('undefined-length element encountered (likely compressed/encapsulated pixel data), not supported');
+    }
+    const key = dicomKey(group, element);
+    if(key === '7FE0,0010'){
+      pixelDataBytes = new Uint8Array(buffer, valueOffset, length);
+      break;
+    }else if(['0028,0002', '0028,0010', '0028,0011', '0028,0100', '0028,0103'].includes(key)){
+      tags[key] = view.getUint16(valueOffset, true);
+    }else if(key === '0028,0004'){
+      tags[key] = dicomReadCString(view, valueOffset, length);
+    }else if(['0028,1050', '0028,1051', '0028,1052', '0028,1053'].includes(key)){
+      tags[key] = parseFloat(dicomReadCString(view, valueOffset, length).split('\\')[0]);
+    }
+    valueOffset += length + (length % 2);
+    p = valueOffset;
+  }
+  if(!pixelDataBytes) throw new Error('no PixelData element found');
+  const rows = tags['0028,0010'], cols = tags['0028,0011'];
+  if(!rows || !cols) throw new Error('missing Rows/Columns');
+
+  return {
+    rows, cols,
+    samplesPerPixel: tags['0028,0002'] || 1,
+    photometric: tags['0028,0004'] || 'MONOCHROME2',
+    bitsAllocated: tags['0028,0100'] || 16,
+    signed: (tags['0028,0103'] || 0) === 1,
+    rescaleSlope: tags['0028,1053'] != null ? tags['0028,1053'] : 1,
+    rescaleIntercept: tags['0028,1052'] != null ? tags['0028,1052'] : 0,
+    windowCenter: tags['0028,1050'],
+    windowWidth: tags['0028,1051'],
+    pixelDataBytes,
+  };
+}
+// Convert a parsed DICOM dataset into {width, height, data: Uint8ClampedArray RGBA},
+// applying Rescale Slope/Intercept and Window Center/Width (or min/max if absent).
+function dicomToImageData(ds){
+  const { rows, cols, samplesPerPixel, photometric, bitsAllocated, signed,
+          rescaleSlope, rescaleIntercept, windowCenter, windowWidth, pixelDataBytes } = ds;
+  const n = rows * cols;
+  const out = new Uint8ClampedArray(n * 4);
+
+  if(samplesPerPixel === 3){
+    for(let i = 0; i < n; i++){
+      const so = i * 3, o = i * 4;
+      out[o] = pixelDataBytes[so]; out[o + 1] = pixelDataBytes[so + 1]; out[o + 2] = pixelDataBytes[so + 2];
+      out[o + 3] = 255;
+    }
+    return {width: cols, height: rows, data: out};
+  }
+
+  const raw = new Float64Array(n);
+  if(bitsAllocated === 8){
+    const view = signed ? new Int8Array(pixelDataBytes.buffer, pixelDataBytes.byteOffset, n) : pixelDataBytes;
+    for(let i = 0; i < n; i++) raw[i] = view[i];
+  }else{
+    const view = new DataView(pixelDataBytes.buffer, pixelDataBytes.byteOffset, n * 2);
+    for(let i = 0; i < n; i++) raw[i] = signed ? view.getInt16(i * 2, true) : view.getUint16(i * 2, true);
+  }
+  let min = Infinity, max = -Infinity;
+  for(let i = 0; i < n; i++){
+    raw[i] = raw[i] * rescaleSlope + rescaleIntercept;
+    if(raw[i] < min) min = raw[i];
+    if(raw[i] > max) max = raw[i];
+  }
+  const hasWindow = windowCenter != null && windowWidth != null && windowWidth > 0;
+  const lo = hasWindow ? windowCenter - windowWidth / 2 : min;
+  const hi = hasWindow ? windowCenter + windowWidth / 2 : max;
+  const range = (hi - lo) || 1;
+  const invert = photometric === 'MONOCHROME1';
+  for(let i = 0; i < n; i++){
+    let g = ((raw[i] - lo) / range) * 255;
+    g = g < 0 ? 0 : g > 255 ? 255 : g;
+    if(invert) g = 255 - g;
+    const o = i * 4;
+    out[o] = out[o + 1] = out[o + 2] = g;
+    out[o + 3] = 255;
+  }
+  return {width: cols, height: rows, data: out};
+}
+function setBackgroundFromDicomImageData(imgData){
+  const tmp = document.createElement('canvas');
+  tmp.width = imgData.width; tmp.height = imgData.height;
+  tmp.getContext('2d').putImageData(new ImageData(imgData.data, imgData.width, imgData.height), 0, 0);
+  setBackgroundFromImageLike(tmp, imgData.width, imgData.height);
+}
+
 /* ============================ view / coordinates ============================ */
 function cssSize(){ const r = stage.getBoundingClientRect(); return [r.width, r.height]; }
 function screenToMask(sx, sy){
@@ -1315,6 +1526,7 @@ function draw(){
   ctx.imageSmoothingEnabled = false;
   ctx.fillStyle = '#20242c';
   ctx.fillRect(0, 0, W, H);
+  if(backgroundCanvas && backgroundVisible) ctx.drawImage(backgroundCanvas, 0, 0);
   ctx.strokeStyle = '#3a4150';
   ctx.lineWidth = 1 / view.scale;
   ctx.strokeRect(0, 0, W, H);
@@ -1891,6 +2103,41 @@ $('batchUnionBtn').addEventListener('click', batchUnionToNew);
 $('batchDeleteBtn').addEventListener('click', batchDelete);
 $('exportPngBtn').addEventListener('click', exportPNG);
 $('exportJsonBtn').addEventListener('click', exportJSON);
+$('uploadImageBtn').addEventListener('click', () => $('imageFileInput').click());
+$('imageFileInput').addEventListener('change', async () => {
+  const file = $('imageFileInput').files[0];
+  $('imageFileInput').value = '';
+  if(!file) return;
+  try{
+    const img = await loadImageFile(file);
+    setBackgroundFromImageLike(img, img.naturalWidth, img.naturalHeight);
+  }catch(err){
+    alert('Could not load image: ' + err.message);
+  }
+});
+$('uploadDicomBtn').addEventListener('click', () => $('dicomFileInput').click());
+$('dicomFileInput').addEventListener('change', async () => {
+  const file = $('dicomFileInput').files[0];
+  $('dicomFileInput').value = '';
+  if(!file) return;
+  try{
+    const buf = await file.arrayBuffer();
+    const ds = parseDicom(buf);
+    setBackgroundFromDicomImageData(dicomToImageData(ds));
+  }catch(err){
+    alert('Could not load DICOM file: ' + err.message);
+  }
+});
+$('bgToggleBtn').addEventListener('click', () => {
+  backgroundVisible = !backgroundVisible;
+  updateBackgroundButtons();
+  scheduleDraw();
+});
+$('bgClearBtn').addEventListener('click', () => {
+  backgroundCanvas = null;
+  updateBackgroundButtons();
+  scheduleDraw();
+});
 
 /* ============================ init ============================ */
 new ResizeObserver(resizeCanvas).observe(stage);
@@ -1943,6 +2190,9 @@ window.__sandbox = {
   copyActiveStructure, pasteStructure,
   clickStructureRow, batchDelete, batchSetVisible, batchUnionToNew,
   exportPNG, exportJSON, uint8ToBase64, base64ToUint8,
+  get backgroundCanvas(){ return backgroundCanvas; },
+  get backgroundVisible(){ return backgroundVisible; },
+  parseDicom, dicomToImageData, setBackgroundFromImageLike, setBackgroundFromDicomImageData,
   refreshUI
 };
 </script>
