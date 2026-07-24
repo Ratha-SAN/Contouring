@@ -97,6 +97,7 @@
     <h2>Tools</h2>
     <div class="toolbtns">
       <button data-tool="pencil">Pencil</button>
+      <button data-tool="shape">Shape</button>
       <button data-tool="brush">Brush</button>
       <button data-tool="eraser">Eraser</button>
       <button data-tool="crop">Crop</button>
@@ -115,6 +116,22 @@
       <label><input type="radio" name="pencil-mode" value="add" checked> Add to structure</label>
       <label><input type="radio" name="pencil-mode" value="subtract"> Subtract from structure</label>
       <div class="hint">Drag a freehand path; it closes and fills on release.</div>
+    </div>
+
+    <div class="panel" id="set-shape">
+      <h3>Shape</h3>
+      <div class="grouplbl">Shape</div>
+      <label><input type="radio" name="shape-kind" value="rect" checked> Rectangle</label>
+      <label><input type="radio" name="shape-kind" value="ellipse"> Ellipse / Circle</label>
+      <label><input type="radio" name="shape-kind" value="polygon"> Regular polygon</label>
+      <div id="shape-sides-row" style="display:none">
+        <div class="grouplbl">Sides: <b id="shape-sides-lbl">5</b></div>
+        <input type="range" id="shape-sides" min="3" max="12" value="5">
+      </div>
+      <div class="grouplbl">Mode</div>
+      <label><input type="radio" name="shape-mode" value="add" checked> Add to structure</label>
+      <label><input type="radio" name="shape-mode" value="subtract"> Subtract from structure</label>
+      <div class="hint">Drag a bounding box; releases fills the shape. Hold Shift to constrain to a square / regular circle.</div>
     </div>
 
     <div class="panel" id="set-brush">
@@ -357,6 +374,35 @@ function rectRegion(x0, y0, x1, y1){
   const yb = Math.min(H - 1, Math.ceil(Math.max(y0, y1)));
   for(let y = ya; y <= yb; y++)
     for(let x = xa; x <= xb; x++) reg[y * W + x] = 1;
+  return reg;
+}
+/* Rectangle / ellipse / regular-polygon bounding-box shape -> region mask.
+   The polygon (or ellipse) is filled on the shared offscreen canvas and
+   thresholded at 50% alpha, same approach as polygonRegion. A regular
+   polygon's vertices are placed on the bounding ellipse so non-square
+   boxes still fill it, with the first vertex pointing up. */
+function shapeRegion(kind, x0, y0, x1, y1, sides){
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const rx = Math.abs(x1 - x0) / 2, ry = Math.abs(y1 - y0) / 2;
+  polyCtx.clearRect(0, 0, W, H);
+  polyCtx.fillStyle = '#fff';
+  polyCtx.beginPath();
+  if(kind === 'ellipse'){
+    polyCtx.ellipse(cx, cy, Math.max(rx, 0.01), Math.max(ry, 0.01), 0, 0, Math.PI * 2);
+  }else if(kind === 'polygon'){
+    for(let i = 0; i < sides; i++){
+      const a = -Math.PI / 2 + i * 2 * Math.PI / sides;
+      const px = cx + rx * Math.cos(a), py = cy + ry * Math.sin(a);
+      if(i === 0) polyCtx.moveTo(px, py); else polyCtx.lineTo(px, py);
+    }
+    polyCtx.closePath();
+  }else{
+    polyCtx.rect(Math.min(x0, x1), Math.min(y0, y1), rx * 2, ry * 2);
+  }
+  polyCtx.fill();
+  const d = polyCtx.getImageData(0, 0, W, H).data;
+  const reg = new Uint8Array(W * H);
+  for(let i = 0; i < W * H; i++) reg[i] = d[i * 4 + 3] >= 128 ? 1 : 0;
   return reg;
 }
 // add=true: mask |= region;  add=false: mask &= ~region
@@ -622,6 +668,32 @@ function draw(){
                    Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
     ctx.setLineDash([]);
   }
+  if(drag && drag.kind === 'shape'){
+    const a = toScr(drag.p0), b = toScr(drag.p1);
+    const kind = getRadio('shape-kind');
+    const scx = (a[0] + b[0]) / 2, scy = (a[1] + b[1]) / 2;
+    const srx = Math.abs(b[0] - a[0]) / 2, sry = Math.abs(b[1] - a[1]) / 2;
+    ctx.strokeStyle = getRadio('shape-mode') === 'add' ? '#7cfc7c' : '#ff6b6b';
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    if(kind === 'ellipse'){
+      ctx.ellipse(scx, scy, Math.max(srx, 0.01), Math.max(sry, 0.01), 0, 0, Math.PI * 2);
+    }else if(kind === 'polygon'){
+      const n = +$('shape-sides').value;
+      for(let i = 0; i < n; i++){
+        const ang = -Math.PI / 2 + i * 2 * Math.PI / n;
+        const px = scx + srx * Math.cos(ang), py = scy + sry * Math.sin(ang);
+        if(i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+    }else{
+      ctx.rect(Math.min(a[0], b[0]), Math.min(a[1], b[1]),
+               Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   // brush / eraser cursor circle
   if(cursorPos && (tool === 'brush' || tool === 'eraser') && !spaceDown){
     const d = tool === 'brush' ? +$('brush-d').value : +$('eraser-d').value;
@@ -719,7 +791,7 @@ function refreshBooleanOperands(){
 }
 
 /* ============================ status bar ============================ */
-const TOOL_NAMES = {pencil:'Pencil', brush:'Brush', eraser:'Eraser',
+const TOOL_NAMES = {pencil:'Pencil', shape:'Shape', brush:'Brush', eraser:'Eraser',
                     crop:'Crop', boolean:'Boolean', extend:'Extend'};
 function updateStatus(){
   $('st-tool').textContent = TOOL_NAMES[tool];
@@ -791,6 +863,8 @@ cv.addEventListener('pointerdown', e => {
       drag = {kind: 'croprect', p0: [mx, my], p1: [mx, my]};
     else
       drag = {kind: 'cropfree', pts: [[mx, my]]};
+  }else if(tool === 'shape'){
+    drag = {kind: 'shape', p0: [mx, my], p1: [mx, my]};
   }
   scheduleDraw();
 });
@@ -816,6 +890,14 @@ cv.addEventListener('pointermove', e => {
       drag.last = [mx, my];
     }else if(drag.kind === 'croprect'){
       drag.p1 = [mx, my];
+    }else if(drag.kind === 'shape'){
+      if(e.shiftKey){
+        const dx = mx - drag.p0[0], dy = my - drag.p0[1];
+        const side = Math.max(Math.abs(dx), Math.abs(dy));
+        drag.p1 = [drag.p0[0] + (dx < 0 ? -side : side), drag.p0[1] + (dy < 0 ? -side : side)];
+      }else{
+        drag.p1 = [mx, my];
+      }
     }
   }
   updateStatus();
@@ -841,6 +923,14 @@ cv.addEventListener('pointerup', e => {
   }else if(d.kind === 'cropfree' && s && d.pts.length >= 3){
     pushUndo();
     cropWithRegion(s.mask, polygonRegion(d.pts));
+    s.dirty = true;
+  }else if(d.kind === 'shape' && s &&
+           Math.abs(d.p1[0] - d.p0[0]) >= 1 && Math.abs(d.p1[1] - d.p0[1]) >= 1){
+    pushUndo();
+    const kind = getRadio('shape-kind');
+    const sides = +$('shape-sides').value;
+    const region = shapeRegion(kind, d.p0[0], d.p0[1], d.p1[0], d.p1[1], sides);
+    applyRegion(s.mask, region, getRadio('shape-mode') === 'add');
     s.dirty = true;
   }
   refreshExtendPreview();
@@ -888,6 +978,14 @@ $('brush-d').addEventListener('input', () => {
 $('eraser-d').addEventListener('input', () => {
   $('eraser-d-lbl').textContent = $('eraser-d').value; scheduleDraw();
 });
+$('shape-sides').addEventListener('input', () => {
+  $('shape-sides-lbl').textContent = $('shape-sides').value; scheduleDraw();
+});
+document.querySelectorAll('input[name="shape-kind"]').forEach(r =>
+  r.addEventListener('change', () => {
+    $('shape-sides-row').style.display = getRadio('shape-kind') === 'polygon' ? 'block' : 'none';
+    scheduleDraw();
+  }));
 $('bool-apply').addEventListener('click', () => {
   const bIdx = parseInt($('bool-b').value, 10);
   if(Number.isNaN(bIdx)) return;
@@ -918,7 +1016,7 @@ window.__sandbox = {
   get undoDepth(){ return undoStack.length; },
   view,
   setActive, addStructure, deleteStructure, setTool,
-  doBoolean, morphMask, polygonRegion, rectRegion,
+  doBoolean, morphMask, polygonRegion, rectRegion, shapeRegion, applyRegion,
   stampDisc, stampSegment,
   pushUndo, undo, redo,
   refreshExtendPreview, applyExtend, refreshUI
