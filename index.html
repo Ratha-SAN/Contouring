@@ -331,6 +331,13 @@
         <input type="file" id="imageFileInput" accept="image/*" style="display:none">
         <input type="file" id="dicomFileInput" accept=".dcm,application/dicom" style="display:none">
       </div>
+      <div class="topgroup">
+        <span class="glabel">Window</span>
+        <label for="wlLevelInput">L</label>
+        <input type="number" id="wlLevelInput" step="1" disabled style="width:64px" title="Window Level (center)">
+        <label for="wlWidthInput">W</label>
+        <input type="number" id="wlWidthInput" step="1" min="1" disabled style="width:64px" title="Window Width">
+      </div>
     </div>
 
     <div id="stage">
@@ -403,6 +410,7 @@ let cropPreview = null;          // {region, cache} live Crop-to-structure previ
 let transPreview = null;         // {mask, cache} live Translate preview
 let backgroundCanvas = null;     // W×H offscreen canvas: uploaded image/DICOM reference layer
 let backgroundVisible = true;
+let currentDicomImage = null;    // dicomExtractSamples() result for the loaded DICOM, or null (plain image / none)
 
 const $ = id => document.getElementById(id);
 const stage = $('stage'), cv = $('cv'), ctx = cv.getContext('2d');
@@ -1312,6 +1320,23 @@ function updateBackgroundButtons(){
   $('bgClearBtn').disabled = !has;
   $('bgToggleBtn').textContent = backgroundVisible ? 'Hide' : 'Show';
 }
+// Sync the Window Level/Width topbar inputs to currentDicomImage; disable+clear when no
+// grayscale DICOM is loaded (windowing is meaningless for plain images or RGB DICOM).
+function updateWindowLevelInputs(center, width){
+  const has = !!currentDicomImage && currentDicomImage.samplesPerPixel !== 3;
+  $('wlLevelInput').disabled = !has;
+  $('wlWidthInput').disabled = !has;
+  $('wlLevelInput').value = has ? Math.round(center) : '';
+  $('wlWidthInput').value = has ? Math.round(width) : '';
+}
+function applyWindowLevel(){
+  if(!currentDicomImage || currentDicomImage.samplesPerPixel === 3) return;
+  let center = parseFloat($('wlLevelInput').value);
+  let width = parseFloat($('wlWidthInput').value);
+  if(!Number.isFinite(center)) center = (currentDicomImage.min + currentDicomImage.max) / 2;
+  if(!Number.isFinite(width) || width < 1) width = 1;
+  setBackgroundFromDicomImageData(windowToImageData(currentDicomImage, center, width));
+}
 function loadImageFile(file){
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -1434,21 +1459,16 @@ function parseDicom(buffer){
     pixelDataBytes,
   };
 }
-// Convert a parsed DICOM dataset into {width, height, data: Uint8ClampedArray RGBA},
-// applying Rescale Slope/Intercept and Window Center/Width (or min/max if absent).
-function dicomToImageData(ds){
+// Extract rescaled sample values (or raw RGB bytes) from a parsed DICOM dataset,
+// independent of windowing, so Window Center/Width can be changed live without re-parsing.
+function dicomExtractSamples(ds){
   const { rows, cols, samplesPerPixel, photometric, bitsAllocated, signed,
-          rescaleSlope, rescaleIntercept, windowCenter, windowWidth, pixelDataBytes } = ds;
+          rescaleSlope, rescaleIntercept, pixelDataBytes } = ds;
   const n = rows * cols;
-  const out = new Uint8ClampedArray(n * 4);
 
   if(samplesPerPixel === 3){
-    for(let i = 0; i < n; i++){
-      const so = i * 3, o = i * 4;
-      out[o] = pixelDataBytes[so]; out[o + 1] = pixelDataBytes[so + 1]; out[o + 2] = pixelDataBytes[so + 2];
-      out[o + 3] = 255;
-    }
-    return {width: cols, height: rows, data: out};
+    return {width: cols, height: rows, samplesPerPixel, photometric,
+            rescaled: null, rgbBytes: pixelDataBytes, min: 0, max: 255};
   }
 
   const raw = new Float64Array(n);
@@ -1465,20 +1485,43 @@ function dicomToImageData(ds){
     if(raw[i] < min) min = raw[i];
     if(raw[i] > max) max = raw[i];
   }
+  return {width: cols, height: rows, samplesPerPixel, photometric, rescaled: raw, rgbBytes: null, min, max};
+}
+// Render extracted samples into {width, height, data: Uint8ClampedArray RGBA} using the
+// given Window Center/Width (or the sample min/max if either is missing/non-positive).
+function windowToImageData(info, windowCenter, windowWidth){
+  const { width, height, samplesPerPixel, photometric, rescaled, rgbBytes, min, max } = info;
+  const n = width * height;
+  const out = new Uint8ClampedArray(n * 4);
+
+  if(samplesPerPixel === 3){
+    for(let i = 0; i < n; i++){
+      const so = i * 3, o = i * 4;
+      out[o] = rgbBytes[so]; out[o + 1] = rgbBytes[so + 1]; out[o + 2] = rgbBytes[so + 2];
+      out[o + 3] = 255;
+    }
+    return {width, height, data: out};
+  }
+
   const hasWindow = windowCenter != null && windowWidth != null && windowWidth > 0;
   const lo = hasWindow ? windowCenter - windowWidth / 2 : min;
   const hi = hasWindow ? windowCenter + windowWidth / 2 : max;
   const range = (hi - lo) || 1;
   const invert = photometric === 'MONOCHROME1';
   for(let i = 0; i < n; i++){
-    let g = ((raw[i] - lo) / range) * 255;
+    let g = ((rescaled[i] - lo) / range) * 255;
     g = g < 0 ? 0 : g > 255 ? 255 : g;
     if(invert) g = 255 - g;
     const o = i * 4;
     out[o] = out[o + 1] = out[o + 2] = g;
     out[o + 3] = 255;
   }
-  return {width: cols, height: rows, data: out};
+  return {width, height, data: out};
+}
+// Convert a parsed DICOM dataset into {width, height, data: Uint8ClampedArray RGBA},
+// applying Rescale Slope/Intercept and Window Center/Width (or min/max if absent).
+function dicomToImageData(ds){
+  return windowToImageData(dicomExtractSamples(ds), ds.windowCenter, ds.windowWidth);
 }
 function setBackgroundFromDicomImageData(imgData){
   const tmp = document.createElement('canvas');
@@ -2110,6 +2153,8 @@ $('imageFileInput').addEventListener('change', async () => {
   if(!file) return;
   try{
     const img = await loadImageFile(file);
+    currentDicomImage = null;
+    updateWindowLevelInputs();
     setBackgroundFromImageLike(img, img.naturalWidth, img.naturalHeight);
   }catch(err){
     alert('Could not load image: ' + err.message);
@@ -2123,11 +2168,20 @@ $('dicomFileInput').addEventListener('change', async () => {
   try{
     const buf = await file.arrayBuffer();
     const ds = parseDicom(buf);
-    setBackgroundFromDicomImageData(dicomToImageData(ds));
+    currentDicomImage = dicomExtractSamples(ds);
+    const hasWindow = ds.windowCenter != null && ds.windowWidth != null && ds.windowWidth > 0;
+    const center = hasWindow ? ds.windowCenter : (currentDicomImage.min + currentDicomImage.max) / 2;
+    const width = hasWindow ? ds.windowWidth : ((currentDicomImage.max - currentDicomImage.min) || 1);
+    updateWindowLevelInputs(center, width);
+    setBackgroundFromDicomImageData(windowToImageData(currentDicomImage, center, width));
   }catch(err){
+    currentDicomImage = null;
+    updateWindowLevelInputs();
     alert('Could not load DICOM file: ' + err.message);
   }
 });
+$('wlLevelInput').addEventListener('input', applyWindowLevel);
+$('wlWidthInput').addEventListener('input', applyWindowLevel);
 $('bgToggleBtn').addEventListener('click', () => {
   backgroundVisible = !backgroundVisible;
   updateBackgroundButtons();
@@ -2135,6 +2189,8 @@ $('bgToggleBtn').addEventListener('click', () => {
 });
 $('bgClearBtn').addEventListener('click', () => {
   backgroundCanvas = null;
+  currentDicomImage = null;
+  updateWindowLevelInputs();
   updateBackgroundButtons();
   scheduleDraw();
 });
@@ -2192,7 +2248,10 @@ window.__sandbox = {
   exportPNG, exportJSON, uint8ToBase64, base64ToUint8,
   get backgroundCanvas(){ return backgroundCanvas; },
   get backgroundVisible(){ return backgroundVisible; },
-  parseDicom, dicomToImageData, setBackgroundFromImageLike, setBackgroundFromDicomImageData,
+  get currentDicomImage(){ return currentDicomImage; },
+  parseDicom, dicomToImageData, dicomExtractSamples, windowToImageData,
+  setBackgroundFromImageLike, setBackgroundFromDicomImageData,
+  updateWindowLevelInputs, applyWindowLevel,
   refreshUI
 };
 </script>
