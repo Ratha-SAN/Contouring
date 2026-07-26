@@ -1563,6 +1563,10 @@ function extractDriveFileId(input){
 // files shared as "Anyone with the link" — Drive does not expose CORS-friendly
 // direct downloads for private files from arbitrary origins without OAuth.
 async function fetchDriveFileBuffer(shareUrl){
+  if(/\/drive\/(u\/\d+\/)?folders\//.test(String(shareUrl))){
+    throw new Error('that looks like a Google Drive folder link, not a file link — open the DICOM ' +
+      'file inside the folder and copy its "Share" link instead (right-click the file → Share → Copy link)');
+  }
   const id = extractDriveFileId(shareUrl);
   if(!id) throw new Error('could not find a Google Drive file ID in that link');
   const downloadUrl = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(id)}`;
