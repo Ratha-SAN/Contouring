@@ -332,6 +332,11 @@
         <input type="file" id="dicomFileInput" accept=".dcm,application/dicom" style="display:none">
       </div>
       <div class="topgroup">
+        <span class="glabel">Drive</span>
+        <input type="text" id="driveLinkInput" placeholder="Google Drive DICOM link" style="width:220px">
+        <button id="driveLoadBtn">Load</button>
+      </div>
+      <div class="topgroup">
         <span class="glabel">Window</span>
         <label for="wlLevelInput">L</label>
         <input type="number" id="wlLevelInput" step="1" disabled style="width:64px" title="Window Level (center)">
@@ -1529,6 +1534,57 @@ function setBackgroundFromDicomImageData(imgData){
   tmp.getContext('2d').putImageData(new ImageData(imgData.data, imgData.width, imgData.height), 0, 0);
   setBackgroundFromImageLike(tmp, imgData.width, imgData.height);
 }
+// Parses a DICOM ArrayBuffer and installs it as the background layer, initializing
+// currentDicomImage and the Window Level/Width inputs — shared by the file-input and
+// Google Drive load paths so both behave identically once bytes are in hand.
+function applyDicomBuffer(buf){
+  const ds = parseDicom(buf);
+  currentDicomImage = dicomExtractSamples(ds);
+  const hasWindow = ds.windowCenter != null && ds.windowWidth != null && ds.windowWidth > 0;
+  const center = hasWindow ? ds.windowCenter : (currentDicomImage.min + currentDicomImage.max) / 2;
+  const width = hasWindow ? ds.windowWidth : ((currentDicomImage.max - currentDicomImage.min) || 1);
+  updateWindowLevelInputs(center, width);
+  setBackgroundFromDicomImageData(windowToImageData(currentDicomImage, center, width));
+}
+// Pulls a Google Drive file ID out of a share link, an "open?id=" link, a direct
+// "uc?id=" link, or a bare file ID pasted directly.
+function extractDriveFileId(input){
+  const s = String(input).trim();
+  let m = s.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if(m) return m[1];
+  m = s.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if(m) return m[1];
+  m = s.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if(m) return m[1];
+  if(/^[a-zA-Z0-9_-]{10,}$/.test(s)) return s;
+  return null;
+}
+// Fetches a DICOM file's raw bytes from a Google Drive share link. Only works for
+// files shared as "Anyone with the link" — Drive does not expose CORS-friendly
+// direct downloads for private files from arbitrary origins without OAuth.
+async function fetchDriveFileBuffer(shareUrl){
+  const id = extractDriveFileId(shareUrl);
+  if(!id) throw new Error('could not find a Google Drive file ID in that link');
+  const downloadUrl = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(id)}`;
+  let resp;
+  try{
+    resp = await fetch(downloadUrl);
+  }catch(err){
+    throw new Error('could not reach Google Drive (network/CORS error) — make sure the file is ' +
+      'shared as "Anyone with the link", or download it and use the DICOM… button instead');
+  }
+  if(!resp.ok) throw new Error(`Google Drive returned HTTP ${resp.status} — check the link and sharing permissions`);
+  const buf = await resp.arrayBuffer();
+  const head = new Uint8Array(buf.slice(0, 256));
+  let headStr = '';
+  for(let i = 0; i < head.length; i++) headStr += String.fromCharCode(head[i]);
+  headStr = headStr.toLowerCase();
+  if(headStr.includes('<html') || headStr.includes('<!doctype')){
+    throw new Error('Google Drive returned a confirmation page instead of the file (common for large ' +
+      'files or restricted sharing) — download it manually and use the DICOM… button instead');
+  }
+  return buf;
+}
 
 /* ============================ view / coordinates ============================ */
 function cssSize(){ const r = stage.getBoundingClientRect(); return [r.width, r.height]; }
@@ -2167,13 +2223,7 @@ $('dicomFileInput').addEventListener('change', async () => {
   if(!file) return;
   try{
     const buf = await file.arrayBuffer();
-    const ds = parseDicom(buf);
-    currentDicomImage = dicomExtractSamples(ds);
-    const hasWindow = ds.windowCenter != null && ds.windowWidth != null && ds.windowWidth > 0;
-    const center = hasWindow ? ds.windowCenter : (currentDicomImage.min + currentDicomImage.max) / 2;
-    const width = hasWindow ? ds.windowWidth : ((currentDicomImage.max - currentDicomImage.min) || 1);
-    updateWindowLevelInputs(center, width);
-    setBackgroundFromDicomImageData(windowToImageData(currentDicomImage, center, width));
+    applyDicomBuffer(buf);
   }catch(err){
     currentDicomImage = null;
     updateWindowLevelInputs();
@@ -2182,6 +2232,27 @@ $('dicomFileInput').addEventListener('change', async () => {
 });
 $('wlLevelInput').addEventListener('input', applyWindowLevel);
 $('wlWidthInput').addEventListener('input', applyWindowLevel);
+async function loadDicomFromDriveLink(){
+  const url = $('driveLinkInput').value;
+  if(!url.trim()) return;
+  $('driveLoadBtn').disabled = true;
+  $('driveLoadBtn').textContent = 'Loading…';
+  try{
+    const buf = await fetchDriveFileBuffer(url);
+    applyDicomBuffer(buf);
+  }catch(err){
+    currentDicomImage = null;
+    updateWindowLevelInputs();
+    alert('Could not load DICOM from Google Drive: ' + err.message);
+  }finally{
+    $('driveLoadBtn').disabled = false;
+    $('driveLoadBtn').textContent = 'Load';
+  }
+}
+$('driveLoadBtn').addEventListener('click', loadDicomFromDriveLink);
+$('driveLinkInput').addEventListener('keydown', (e) => {
+  if(e.key === 'Enter'){ e.preventDefault(); loadDicomFromDriveLink(); }
+});
 $('bgToggleBtn').addEventListener('click', () => {
   backgroundVisible = !backgroundVisible;
   updateBackgroundButtons();
@@ -2252,6 +2323,7 @@ window.__sandbox = {
   parseDicom, dicomToImageData, dicomExtractSamples, windowToImageData,
   setBackgroundFromImageLike, setBackgroundFromDicomImageData,
   updateWindowLevelInputs, applyWindowLevel,
+  applyDicomBuffer, extractDriveFileId, fetchDriveFileBuffer, loadDicomFromDriveLink,
   refreshUI
 };
 </script>
