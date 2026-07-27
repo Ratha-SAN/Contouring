@@ -38,6 +38,7 @@
   #topbar input[type=range]{width:110px;}
   #zoomControls{display:flex; align-items:center; gap:6px;}
   #zoomToggleBtn.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
+  #mpr3dToggleBtn.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
 
   /* Upload dropdown: single "Upload" button revealing Image/DICOM choices,
      with DICOM drilling into a From-file / From-Drive sub-view. */
@@ -113,6 +114,28 @@
   #pandpad button:hover{border-color:var(--accent); color:var(--accent);}
   #pandpad .padctr{display:flex; align-items:center; justify-content:center;
     color:var(--dim); font-size:12px;}
+
+  /* 3D (Axial/Coronal/Sagittal) MPR viewer, swapped in for #stage */
+  #stage3d{flex:1; display:none; flex-direction:column; min-width:0; min-height:0; background:var(--bg);}
+  .mpr-toolbar{display:flex; align-items:center; gap:6px; padding:6px 12px;
+    border-bottom:1px solid var(--border); background:var(--panel);}
+  .mpr-toolbar input[type=number]{background:var(--panel2); color:var(--text);
+    border:1px solid var(--border); border-radius:4px; padding:4px; font:inherit;}
+  .mpr-grid{flex:1; display:flex; min-height:0;}
+  .mpr-pane{flex:1; min-width:0; display:flex; flex-direction:column;
+    border-right:1px solid var(--border);}
+  .mpr-pane:last-child{border-right:none;}
+  .mpr-hdr{display:flex; align-items:center; gap:6px; padding:5px 8px;
+    background:var(--panel); border-bottom:1px solid var(--border); font-size:12px;}
+  .mpr-hdr .mpr-idx{color:var(--dim); margin-right:auto;}
+  .mpr-btn{background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    border-radius:4px; padding:2px 7px; cursor:pointer; font:inherit; font-size:12px;}
+  .mpr-btn:hover{border-color:var(--accent); color:var(--accent);}
+  .mpr-canvaswrap{flex:1; position:relative; min-height:0; background:#000; overflow:hidden;}
+  .mpr-canvaswrap canvas{position:absolute; inset:0; width:100%; height:100%;
+    touch-action:none; cursor:grab;}
+  .mpr-slider{width:100%; margin:0; padding:4px 8px; box-sizing:border-box;}
+  .mpr-hint{padding:6px 12px; color:var(--dim); font-size:11px; border-top:1px solid var(--border);}
 
   /* right structure list */
   #side{width:230px; background:var(--panel); border-left:1px solid var(--border);
@@ -346,11 +369,17 @@
             <div id="uploadMenuRoot" class="menu-view">
               <button id="uploadImageBtn" class="menu-item">Image&hellip;</button>
               <button id="uploadDicomMenuBtn" class="menu-item">DICOM &#9656;</button>
+              <button id="uploadSeriesMenuBtn" class="menu-item">DICOM Series (3D) &#9656;</button>
             </div>
             <div id="uploadMenuDicom" class="menu-view" style="display:none">
               <button id="dicomBackBtn" class="menu-item menu-back">&#9666; Back</button>
               <button id="dicomFromFileBtn" class="menu-item">From file&hellip;</button>
               <button id="dicomFromDriveBtn" class="menu-item">From Drive&hellip;</button>
+            </div>
+            <div id="uploadMenuSeries" class="menu-view" style="display:none">
+              <button id="seriesBackBtn" class="menu-item menu-back">&#9666; Back</button>
+              <button id="seriesFromFolderBtn" class="menu-item">From local folder&hellip;</button>
+              <button id="seriesFromDriveBtn" class="menu-item">From Drive folder&hellip;</button>
             </div>
           </div>
         </div>
@@ -358,6 +387,7 @@
         <button id="bgClearBtn" disabled>Clear</button>
         <input type="file" id="imageFileInput" accept="image/*" style="display:none">
         <input type="file" id="dicomFileInput" accept=".dcm,application/dicom" style="display:none">
+        <input type="file" id="dicomFolderInput" webkitdirectory multiple style="display:none">
       </div>
       <div class="topgroup">
         <span class="glabel">Window</span>
@@ -365,6 +395,10 @@
         <input type="number" id="wlLevelInput" step="1" disabled style="width:64px" title="Window Level (center)">
         <label for="wlWidthInput">W</label>
         <input type="number" id="wlWidthInput" step="1" min="1" disabled style="width:64px" title="Window Width">
+      </div>
+      <div class="topgroup">
+        <span class="glabel">3D</span>
+        <button id="mpr3dToggleBtn" title="Toggle the Axial/Coronal/Sagittal 3D view" disabled>3D View</button>
       </div>
     </div>
 
@@ -380,6 +414,49 @@
         <button id="panLeftBtn" title="Pan left">&larr;</button><span class="padctr">&#10021;</span><button id="panRightBtn" title="Pan right">&rarr;</button>
         <span></span><button id="panDownBtn" title="Pan down">&darr;</button><span></span>
       </div>
+    </div>
+
+    <div id="stage3d" style="display:none">
+      <div class="mpr-toolbar">
+        <span class="glabel">Window</span>
+        <label for="mprLevelInput">L</label>
+        <input type="number" id="mprLevelInput" step="1" style="width:64px" title="Window Level (center)">
+        <label for="mprWidthInput">W</label>
+        <input type="number" id="mprWidthInput" step="1" min="1" style="width:64px" title="Window Width">
+      </div>
+      <div class="mpr-grid">
+        <div class="mpr-pane" data-plane="axial">
+          <div class="mpr-hdr">
+            <span>Axial</span><span class="mpr-idx" id="mpr-axial-idx">0/0</span>
+            <button class="mpr-btn" id="mpr-axial-zoomout" title="Zoom out">&minus;</button>
+            <button class="mpr-btn" id="mpr-axial-zoomin" title="Zoom in">+</button>
+            <button class="mpr-btn" id="mpr-axial-fit" title="Fit">Fit</button>
+          </div>
+          <div class="mpr-canvaswrap"><canvas id="mpr-axial-canvas"></canvas></div>
+          <input type="range" class="mpr-slider" id="mpr-axial-slider" min="0" max="0" value="0">
+        </div>
+        <div class="mpr-pane" data-plane="coronal">
+          <div class="mpr-hdr">
+            <span>Coronal</span><span class="mpr-idx" id="mpr-coronal-idx">0/0</span>
+            <button class="mpr-btn" id="mpr-coronal-zoomout" title="Zoom out">&minus;</button>
+            <button class="mpr-btn" id="mpr-coronal-zoomin" title="Zoom in">+</button>
+            <button class="mpr-btn" id="mpr-coronal-fit" title="Fit">Fit</button>
+          </div>
+          <div class="mpr-canvaswrap"><canvas id="mpr-coronal-canvas"></canvas></div>
+          <input type="range" class="mpr-slider" id="mpr-coronal-slider" min="0" max="0" value="0">
+        </div>
+        <div class="mpr-pane" data-plane="sagittal">
+          <div class="mpr-hdr">
+            <span>Sagittal</span><span class="mpr-idx" id="mpr-sagittal-idx">0/0</span>
+            <button class="mpr-btn" id="mpr-sagittal-zoomout" title="Zoom out">&minus;</button>
+            <button class="mpr-btn" id="mpr-sagittal-zoomin" title="Zoom in">+</button>
+            <button class="mpr-btn" id="mpr-sagittal-fit" title="Fit">Fit</button>
+          </div>
+          <div class="mpr-canvaswrap"><canvas id="mpr-sagittal-canvas"></canvas></div>
+          <input type="range" class="mpr-slider" id="mpr-sagittal-slider" min="0" max="0" value="0">
+        </div>
+      </div>
+      <div class="mpr-hint">Scroll: change slice &middot; Ctrl/Cmd+scroll: zoom &middot; Drag: pan</div>
     </div>
   </div>
 
@@ -1390,6 +1467,8 @@ const DICOM_IMPLICIT_VR = {
   '0028,0002': 'US', '0028,0004': 'CS', '0028,0010': 'US', '0028,0011': 'US',
   '0028,0100': 'US', '0028,0103': 'US',
   '0028,1050': 'DS', '0028,1051': 'DS', '0028,1052': 'DS', '0028,1053': 'DS',
+  '0028,0030': 'DS', '0018,0050': 'DS',
+  '0020,000E': 'UI', '0020,0032': 'DS', '0020,0013': 'IS', '0020,1041': 'DS',
   '7FE0,0010': 'OW',
 };
 function dicomReadCString(view, offset, length){
@@ -1462,10 +1541,16 @@ function parseDicom(buffer){
       break;
     }else if(['0028,0002', '0028,0010', '0028,0011', '0028,0100', '0028,0103'].includes(key)){
       tags[key] = view.getUint16(valueOffset, true);
-    }else if(key === '0028,0004'){
+    }else if(['0028,0004', '0020,000E'].includes(key)){
       tags[key] = dicomReadCString(view, valueOffset, length);
-    }else if(['0028,1050', '0028,1051', '0028,1052', '0028,1053'].includes(key)){
+    }else if(['0028,1050', '0028,1051', '0028,1052', '0028,1053', '0018,0050', '0020,1041'].includes(key)){
       tags[key] = parseFloat(dicomReadCString(view, valueOffset, length).split('\\')[0]);
+    }else if(key === '0020,0013'){
+      tags[key] = parseInt(dicomReadCString(view, valueOffset, length), 10);
+    }else if(key === '0028,0030'){
+      tags[key] = dicomReadCString(view, valueOffset, length).split('\\').map(Number);
+    }else if(key === '0020,0032'){
+      tags[key] = dicomReadCString(view, valueOffset, length).split('\\').map(Number);
     }
     valueOffset += length + (length % 2);
     p = valueOffset;
@@ -1485,6 +1570,13 @@ function parseDicom(buffer){
     windowCenter: tags['0028,1050'],
     windowWidth: tags['0028,1051'],
     pixelDataBytes,
+    // series-oriented tags, used only when building a 3D volume from a folder of slices
+    seriesInstanceUID: tags['0020,000E'],
+    imagePositionPatient: tags['0020,0032'],   // [x, y, z] mm, or undefined
+    instanceNumber: tags['0020,0013'],
+    sliceLocation: tags['0020,1041'],
+    pixelSpacing: tags['0028,0030'],   // [rowSpacingMm, colSpacingMm], or undefined
+    sliceThickness: tags['0018,0050'],
   };
 }
 // Extract rescaled sample values (or raw RGB bytes) from a parsed DICOM dataset,
@@ -1677,6 +1769,352 @@ async function loadDicomFromGoogleDrivePicker(){
   }finally{
     $('dicomFromDriveBtn').disabled = false;
     $('dicomFromDriveBtn').textContent = prevLabel;
+  }
+}
+
+/* ============================ 3D series / MPR viewer ============================
+   Builds a volume from a folder of same-series DICOM slices and renders three
+   independent orthogonal panes (Axial/Coronal/Sagittal), each with its own
+   pan/zoom/scroll. Read-only reference viewer — a separate mode from the
+   single-image 2D contouring canvas, which is untouched by any of this. */
+let dicomVolume = null;   // {cols, rows, numSlices, data, spacingX, spacingY, spacingZ, minVal, maxVal, defaultCenter, defaultWidth}
+let mprMode = false;
+let mprWindowCenter = 0, mprWindowWidth = 1;
+const MPR_PLANES = ['axial', 'coronal', 'sagittal'];
+const mprView = {
+  axial: {index: 0, scale: 1, tx: 0, ty: 0},
+  coronal: {index: 0, scale: 1, tx: 0, ty: 0},
+  sagittal: {index: 0, scale: 1, tx: 0, ty: 0},
+};
+
+// Groups parsed DICOM datasets by series, sorts the largest group into slice
+// order, and stacks their rescaled samples into one Float32Array volume.
+function buildDicomVolume(dsList){
+  if(dsList.length === 0) throw new Error('no valid DICOM slices found');
+
+  const groups = new Map();
+  for(const ds of dsList){
+    const key = ds.seriesInstanceUID || '__default__';
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(ds);
+  }
+  let series = null;
+  for(const g of groups.values()) if(!series || g.length > series.length) series = g;
+
+  if(series.some(ds => ds.samplesPerPixel === 3)){
+    throw new Error('color (RGB) DICOM series are not supported for 3D reconstruction');
+  }
+  const rows = series[0].rows, cols = series[0].cols;
+  if(series.some(ds => ds.rows !== rows || ds.cols !== cols)){
+    throw new Error('slices in this series have mismatched Rows/Columns; cannot build a volume');
+  }
+
+  const withZ = series.every(ds => Array.isArray(ds.imagePositionPatient) && ds.imagePositionPatient.length === 3);
+  const withLoc = series.every(ds => Number.isFinite(ds.sliceLocation));
+  const withInst = series.every(ds => Number.isFinite(ds.instanceNumber));
+  const sorted = series.slice();
+  if(withZ) sorted.sort((a, b) => a.imagePositionPatient[2] - b.imagePositionPatient[2]);
+  else if(withLoc) sorted.sort((a, b) => a.sliceLocation - b.sliceLocation);
+  else if(withInst) sorted.sort((a, b) => a.instanceNumber - b.instanceNumber);
+
+  const numSlices = sorted.length;
+  const data = new Float32Array(cols * rows * numSlices);
+  let minVal = Infinity, maxVal = -Infinity;
+  let sumCenter = 0, sumWidth = 0, windowCount = 0;
+  for(let z = 0; z < numSlices; z++){
+    const info = dicomExtractSamples(sorted[z]);
+    data.set(info.rescaled, z * cols * rows);
+    if(info.min < minVal) minVal = info.min;
+    if(info.max > maxVal) maxVal = info.max;
+    const ds = sorted[z];
+    if(ds.windowCenter != null && ds.windowWidth > 0){ sumCenter += ds.windowCenter; sumWidth += ds.windowWidth; windowCount++; }
+  }
+
+  const ps = sorted[0].pixelSpacing;
+  const spacingY = (ps && ps[0]) || 1;   // DICOM PixelSpacing = [row spacing, column spacing]
+  const spacingX = (ps && ps[1]) || 1;
+  let spacingZ = 1;
+  if(withZ && numSlices > 1){
+    const diffs = [];
+    for(let i = 1; i < numSlices; i++) diffs.push(Math.abs(sorted[i].imagePositionPatient[2] - sorted[i - 1].imagePositionPatient[2]));
+    diffs.sort((a, b) => a - b);
+    spacingZ = diffs[Math.floor(diffs.length / 2)] || 1;
+  }else if(Number.isFinite(sorted[0].sliceThickness) && sorted[0].sliceThickness > 0){
+    spacingZ = sorted[0].sliceThickness;
+  }
+
+  const defaultCenter = windowCount > 0 ? sumCenter / windowCount : (minVal + maxVal) / 2;
+  const defaultWidth = windowCount > 0 ? sumWidth / windowCount : ((maxVal - minVal) || 1);
+
+  return {cols, rows, numSlices, data, spacingX, spacingY, spacingZ, minVal, maxVal, defaultCenter, defaultWidth};
+}
+// Axial: fixed z (slice), full (x,y) plane — a straight contiguous copy.
+function extractAxialSlice(vol, z){
+  const {cols, rows, data} = vol;
+  const values = new Float32Array(cols * rows);
+  values.set(data.subarray(z * cols * rows, (z + 1) * cols * rows));
+  return {width: cols, height: rows, values};
+}
+// Coronal: fixed row y, gathering that row from every axial slice — width=cols, height=numSlices.
+function extractCoronalSlice(vol, y){
+  const {cols, rows, numSlices, data} = vol;
+  const values = new Float32Array(cols * numSlices);
+  for(let z = 0; z < numSlices; z++){
+    const base = z * cols * rows + y * cols;
+    values.set(data.subarray(base, base + cols), z * cols);
+  }
+  return {width: cols, height: numSlices, values};
+}
+// Sagittal: fixed column x, gathering that column from every axial slice — width=rows, height=numSlices.
+function extractSagittalSlice(vol, x){
+  const {cols, rows, numSlices, data} = vol;
+  const values = new Float32Array(rows * numSlices);
+  for(let z = 0; z < numSlices; z++){
+    const sliceBase = z * cols * rows;
+    for(let y = 0; y < rows; y++) values[z * rows + y] = data[sliceBase + y * cols + x];
+  }
+  return {width: rows, height: numSlices, values};
+}
+function mprPlaneCount(plane){
+  if(!dicomVolume) return 1;
+  if(plane === 'axial') return dicomVolume.numSlices;
+  if(plane === 'coronal') return dicomVolume.rows;
+  return dicomVolume.cols;
+}
+function extractMprSlice(plane, index){
+  if(plane === 'axial') return extractAxialSlice(dicomVolume, index);
+  if(plane === 'coronal') return extractCoronalSlice(dicomVolume, index);
+  return extractSagittalSlice(dicomVolume, index);
+}
+// Physical (mm) width/height of one raw sample in the given plane's source image.
+function mprPlaneSpacing(plane){
+  if(plane === 'axial') return [dicomVolume.spacingX, dicomVolume.spacingY];
+  if(plane === 'coronal') return [dicomVolume.spacingX, dicomVolume.spacingZ];
+  return [dicomVolume.spacingY, dicomVolume.spacingZ];
+}
+function windowSliceToImageData(slice, center, width){
+  const {width: w, height: h, values} = slice;
+  const n = w * h;
+  const out = new Uint8ClampedArray(n * 4);
+  const lo = center - width / 2, hi = center + width / 2;
+  const range = (hi - lo) || 1;
+  for(let i = 0; i < n; i++){
+    let g = ((values[i] - lo) / range) * 255;
+    g = g < 0 ? 0 : g > 255 ? 255 : g;
+    const o = i * 4;
+    out[o] = out[o + 1] = out[o + 2] = g; out[o + 3] = 255;
+  }
+  return new ImageData(out, w, h);
+}
+function updateMprWindowInputs(){
+  $('mprLevelInput').value = Math.round(mprWindowCenter);
+  $('mprWidthInput').value = Math.round(mprWindowWidth);
+}
+function applyMprWindowLevel(){
+  if(!dicomVolume) return;
+  let center = parseFloat($('mprLevelInput').value);
+  let width = parseFloat($('mprWidthInput').value);
+  if(!Number.isFinite(center)) center = dicomVolume.defaultCenter;
+  if(!Number.isFinite(width) || width < 1) width = 1;
+  mprWindowCenter = center; mprWindowWidth = width;
+  renderAllMprPanes();
+}
+function updateMprSliceUI(plane){
+  const pv = mprView[plane];
+  const count = mprPlaneCount(plane);
+  $(`mpr-${plane}-idx`).textContent = `${count ? pv.index + 1 : 0}/${count}`;
+  const slider = $(`mpr-${plane}-slider`);
+  slider.max = String(Math.max(0, count - 1));
+  slider.value = String(pv.index);
+}
+function fitMprPane(plane){
+  if(!dicomVolume) return;
+  const pv = mprView[plane];
+  const wrap = $(`mpr-${plane}-canvas`).parentElement;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  const [sw, sh] = mprPlaneSpacing(plane);
+  const slice0 = plane === 'axial' ? {width: dicomVolume.cols, height: dicomVolume.rows}
+    : plane === 'coronal' ? {width: dicomVolume.cols, height: dicomVolume.numSlices}
+    : {width: dicomVolume.rows, height: dicomVolume.numSlices};
+  const physW = slice0.width * sw, physH = slice0.height * sh;
+  const scale = Math.min((cw - 20) / physW, (ch - 20) / physH) || 1;
+  pv.scale = scale;
+  pv.tx = (cw - physW * scale) / 2;
+  pv.ty = (ch - physH * scale) / 2;
+}
+function renderMprPane(plane){
+  const canvas = $(`mpr-${plane}-canvas`);
+  const wrap = canvas.parentElement;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.round(cw * dpr));
+  canvas.height = Math.max(1, Math.round(ch * dpr));
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, cw, ch);
+  if(!dicomVolume) return;
+
+  const pv = mprView[plane];
+  const slice = extractMprSlice(plane, pv.index);
+  const [sw, sh] = mprPlaneSpacing(plane);
+  const imgData = windowSliceToImageData(slice, mprWindowCenter, mprWindowWidth);
+  const off = document.createElement('canvas');
+  off.width = slice.width; off.height = slice.height;
+  off.getContext('2d').putImageData(imgData, 0, 0);
+
+  const dw = slice.width * sw * pv.scale, dh = slice.height * sh * pv.scale;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(off, pv.tx, pv.ty, dw, dh);
+}
+function renderAllMprPanes(){ MPR_PLANES.forEach(renderMprPane); }
+function setMprMode(on){
+  mprMode = on;
+  $('stage').style.display = on ? 'none' : 'block';
+  $('stage3d').style.display = on ? 'flex' : 'none';
+  $('mpr3dToggleBtn').classList.toggle('sel', on);
+  if(on) requestAnimationFrame(() => {
+    MPR_PLANES.forEach(p => { fitMprPane(p); updateMprSliceUI(p); renderMprPane(p); });
+  });
+}
+function mprPaneInteraction(plane){
+  const canvas = $(`mpr-${plane}-canvas`);
+  canvas.addEventListener('wheel', (e) => {
+    if(!dicomVolume) return;
+    e.preventDefault();
+    const pv = mprView[plane];
+    if(e.ctrlKey || e.metaKey){
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      pv.tx = mx - (mx - pv.tx) * factor;
+      pv.ty = my - (my - pv.ty) * factor;
+      pv.scale *= factor;
+    }else{
+      const maxIdx = mprPlaneCount(plane) - 1;
+      const dir = e.deltaY > 0 ? 1 : -1;
+      pv.index = Math.max(0, Math.min(maxIdx, pv.index + dir));
+      updateMprSliceUI(plane);
+    }
+    renderMprPane(plane);
+  }, {passive: false});
+  let dragging = false, lastX = 0, lastY = 0;
+  canvas.addEventListener('pointerdown', (e) => {
+    if(!dicomVolume) return;
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if(!dragging) return;
+    const pv = mprView[plane];
+    pv.tx += e.clientX - lastX; pv.ty += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    renderMprPane(plane);
+  });
+  const endDrag = () => { dragging = false; };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  $(`mpr-${plane}-slider`).addEventListener('input', () => {
+    mprView[plane].index = +$(`mpr-${plane}-slider`).value;
+    updateMprSliceUI(plane);
+    renderMprPane(plane);
+  });
+  $(`mpr-${plane}-fit`).addEventListener('click', () => { fitMprPane(plane); renderMprPane(plane); });
+  $(`mpr-${plane}-zoomin`).addEventListener('click', () => { mprView[plane].scale *= 1.25; renderMprPane(plane); });
+  $(`mpr-${plane}-zoomout`).addEventListener('click', () => { mprView[plane].scale /= 1.25; renderMprPane(plane); });
+}
+// Installs the freshly-built volume as the active 3D series and enters 3D mode.
+function installDicomVolume(vol){
+  dicomVolume = vol;
+  mprWindowCenter = vol.defaultCenter;
+  mprWindowWidth = vol.defaultWidth;
+  mprView.axial.index = Math.floor(vol.numSlices / 2);
+  mprView.coronal.index = Math.floor(vol.rows / 2);
+  mprView.sagittal.index = Math.floor(vol.cols / 2);
+  updateMprWindowInputs();
+  $('mpr3dToggleBtn').disabled = false;
+  setMprMode(true);
+}
+// Parses whatever files look like DICOM out of a FileList/array, skipping the rest
+// (folders commonly also contain DICOMDIR, readme files, etc.).
+async function parseDicomFilesLoosely(files){
+  const dsList = [];
+  for(const file of files){
+    try{
+      const buf = await file.arrayBuffer();
+      dsList.push(parseDicom(buf));
+    }catch(err){ /* not a DICOM file (or unsupported) — skip it */ }
+  }
+  return dsList;
+}
+async function loadDicomSeriesFromFiles(files){
+  const dsList = await parseDicomFilesLoosely(files);
+  if(dsList.length === 0){ alert('No valid DICOM files found in that folder.'); return; }
+  try{
+    installDicomVolume(buildDicomVolume(dsList));
+    closeUploadMenu();
+  }catch(err){
+    alert('Could not build a 3D volume: ' + err.message);
+  }
+}
+// Lists a Google Drive folder's (non-folder) files via the Drive API.
+async function listDriveFolderFiles(folderId){
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+  const resp = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType)&pageSize=1000`,
+    {headers: {Authorization: `Bearer ${googleAccessToken}`}});
+  if(!resp.ok) throw new Error(`Google Drive returned HTTP ${resp.status} while listing the folder`);
+  const json = await resp.json();
+  return (json.files || []).filter(f => f.mimeType !== 'application/vnd.google-apps.folder');
+}
+// Opens Google's picker restricted to folder selection; resolves with the picked folder's ID.
+function showDriveFolderPicker(){
+  return new Promise((resolve, reject) => {
+    const view = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+      .setIncludeFolders(true).setSelectFolderEnabled(true);
+    const picker = new google.picker.PickerBuilder()
+      .addView(view)
+      .setOAuthToken(googleAccessToken)
+      .setDeveloperKey(GOOGLE_API_KEY)
+      .setCallback((data) => {
+        if(data.action === google.picker.Action.PICKED) resolve(data.docs[0].id);
+        else if(data.action === google.picker.Action.CANCEL) reject(new Error('cancelled'));
+      })
+      .build();
+    picker.setVisible(true);
+  });
+}
+async function loadDicomSeriesFromGoogleDrivePicker(){
+  $('seriesFromDriveBtn').disabled = true;
+  const prevLabel = $('seriesFromDriveBtn').textContent;
+  try{
+    $('seriesFromDriveBtn').textContent = 'Connecting…';
+    await loadGoogleApis();
+    await ensureGoogleAuth();
+    let folderId;
+    try{
+      folderId = await showDriveFolderPicker();
+    }catch(err){
+      if(err.message === 'cancelled') return;
+      throw err;
+    }
+    $('seriesFromDriveBtn').textContent = 'Listing files…';
+    const files = await listDriveFolderFiles(folderId);
+    if(files.length === 0) throw new Error('that folder has no files in it');
+    const dsList = [];
+    for(let i = 0; i < files.length; i++){
+      $('seriesFromDriveBtn').textContent = `Downloading ${i + 1}/${files.length}…`;
+      try{
+        const buf = await downloadDriveFileById(files[i].id);
+        dsList.push(parseDicom(buf));
+      }catch(err){ /* not a DICOM file — skip it */ }
+    }
+    if(dsList.length === 0) throw new Error('no valid DICOM files found in that folder');
+    installDicomVolume(buildDicomVolume(dsList));
+  }catch(err){
+    alert('Could not load a DICOM series from Google Drive: ' + err.message);
+  }finally{
+    $('seriesFromDriveBtn').disabled = false;
+    $('seriesFromDriveBtn').textContent = prevLabel;
   }
 }
 
@@ -2296,10 +2734,11 @@ $('batchUnionBtn').addEventListener('click', batchUnionToNew);
 $('batchDeleteBtn').addEventListener('click', batchDelete);
 $('exportPngBtn').addEventListener('click', exportPNG);
 $('exportJsonBtn').addEventListener('click', exportJSON);
-/* upload dropdown: Upload -> {Image, DICOM -> {From file, From Drive}} */
+/* upload dropdown: Upload -> {Image, DICOM -> {From file, From Drive}, DICOM Series -> {folder, Drive folder}} */
 function showUploadMenuView(view){
   $('uploadMenuRoot').style.display = view === 'root' ? 'flex' : 'none';
   $('uploadMenuDicom').style.display = view === 'dicom' ? 'flex' : 'none';
+  $('uploadMenuSeries').style.display = view === 'series' ? 'flex' : 'none';
 }
 function openUploadMenu(){
   showUploadMenuView('root');
@@ -2348,6 +2787,24 @@ $('dicomFromFileBtn').addEventListener('click', () => {
   $('dicomFileInput').click();
 });
 $('dicomFromDriveBtn').addEventListener('click', loadDicomFromGoogleDrivePicker);
+$('uploadSeriesMenuBtn').addEventListener('click', () => showUploadMenuView('series'));
+$('seriesBackBtn').addEventListener('click', () => showUploadMenuView('root'));
+$('seriesFromFolderBtn').addEventListener('click', () => {
+  closeUploadMenu();
+  $('dicomFolderInput').click();
+});
+$('dicomFolderInput').addEventListener('change', async () => {
+  const files = Array.from($('dicomFolderInput').files);
+  $('dicomFolderInput').value = '';
+  if(files.length === 0) return;
+  await loadDicomSeriesFromFiles(files);
+});
+$('seriesFromDriveBtn').addEventListener('click', loadDicomSeriesFromGoogleDrivePicker);
+$('mpr3dToggleBtn').addEventListener('click', () => setMprMode(!mprMode));
+$('mprLevelInput').addEventListener('input', applyMprWindowLevel);
+$('mprWidthInput').addEventListener('input', applyMprWindowLevel);
+MPR_PLANES.forEach(mprPaneInteraction);
+new ResizeObserver(() => { if(mprMode) renderAllMprPanes(); }).observe($('stage3d'));
 $('dicomFileInput').addEventListener('change', async () => {
   const file = $('dicomFileInput').files[0];
   $('dicomFileInput').value = '';
@@ -2438,6 +2895,16 @@ window.__sandbox = {
   loadGoogleApis, ensureGoogleAuth, showDrivePicker, downloadDriveFileById, loadDicomFromGoogleDrivePicker,
   get googleAccessToken(){ return googleAccessToken; },
   set googleAccessToken(v){ googleAccessToken = v; },
+  get dicomVolume(){ return dicomVolume; },
+  get mprMode(){ return mprMode; },
+  get mprView(){ return mprView; },
+  get mprWindowCenter(){ return mprWindowCenter; },
+  get mprWindowWidth(){ return mprWindowWidth; },
+  buildDicomVolume, extractAxialSlice, extractCoronalSlice, extractSagittalSlice,
+  extractMprSlice, mprPlaneSpacing, mprPlaneCount, windowSliceToImageData,
+  fitMprPane, renderMprPane, renderAllMprPanes, setMprMode, applyMprWindowLevel,
+  installDicomVolume, parseDicomFilesLoosely, loadDicomSeriesFromFiles,
+  showDriveFolderPicker, listDriveFolderFiles, loadDicomSeriesFromGoogleDrivePicker,
   refreshUI
 };
 </script>
