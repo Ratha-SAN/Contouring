@@ -377,6 +377,7 @@
               <button id="uploadDicomMenuBtn" class="menu-item">DICOM &#9656;</button>
               <button id="uploadSeriesMenuBtn" class="menu-item">DICOM Series (3D) &#9656;</button>
               <button id="uploadDoseMenuBtn" class="menu-item">DICOM Dose &#9656;</button>
+              <button id="uploadRTStructMenuBtn" class="menu-item">DICOM RTSTRUCT &#9656;</button>
             </div>
             <div id="uploadMenuDicom" class="menu-view" style="display:none">
               <button id="dicomBackBtn" class="menu-item menu-back">&#9666; Back</button>
@@ -393,6 +394,11 @@
               <button id="doseFromFileBtn" class="menu-item">From file&hellip;</button>
               <button id="doseFromDriveBtn" class="menu-item">From Drive&hellip;</button>
             </div>
+            <div id="uploadMenuRTStruct" class="menu-view" style="display:none">
+              <button id="rtstructBackBtn" class="menu-item menu-back">&#9666; Back</button>
+              <button id="rtstructFromFileBtn" class="menu-item">From file&hellip;</button>
+              <button id="rtstructFromDriveBtn" class="menu-item">From Drive&hellip;</button>
+            </div>
           </div>
         </div>
         <button id="bgToggleBtn" disabled>Hide</button>
@@ -400,6 +406,7 @@
         <input type="file" id="imageFileInput" accept="image/*" style="display:none">
         <input type="file" id="dicomFileInput" accept=".dcm,application/dicom" style="display:none">
         <input type="file" id="dicomFolderInput" webkitdirectory multiple style="display:none">
+        <input type="file" id="rtstructFileInput" accept=".dcm,application/dicom" style="display:none">
         <input type="file" id="doseFileInput" accept=".dcm,application/dicom" style="display:none">
       </div>
       <div class="topgroup">
@@ -1494,6 +1501,9 @@ const DICOM_IMPLICIT_VR = {
   '0028,0030': 'DS', '0018,0050': 'DS',
   '0020,000E': 'UI', '0020,0032': 'DS', '0020,0013': 'IS', '0020,1041': 'DS',
   '0008,0060': 'CS', '0028,0008': 'IS', '3004,000C': 'DS', '3004,000E': 'DS',
+  '3006,0020': 'SQ', '3006,0022': 'IS', '3006,0026': 'LO',
+  '3006,0039': 'SQ', '3006,002A': 'IS', '3006,0084': 'IS', '3006,0040': 'SQ',
+  '3006,0042': 'CS', '3006,0046': 'IS', '3006,0050': 'DS',
   '7FE0,0010': 'OW',
 };
 function dicomReadCString(view, offset, length){
@@ -1553,6 +1563,200 @@ function dicomSkipItemElements(view, buffer, p, implicit){
     p = (length === 0xFFFFFFFF) ? dicomSkipSequence(view, buffer, valueOffset, implicit) : valueOffset + length + (length % 2);
   }
   return p;
+}
+/* --- generic sequence READING (as opposed to dicomSkipSequence's skipping) ---
+   Used by RTSTRUCT parsing to actually walk into StructureSetROISequence /
+   ROIContourSequence / ContourSequence and read their per-item contents,
+   reusing the same item/delimiter navigation as the skip functions above. */
+function dicomReadElementHeader(view, p, implicit){
+  const group = view.getUint16(p, true), element = view.getUint16(p + 2, true);
+  let vr, length, valueOffset;
+  if(implicit){
+    vr = DICOM_IMPLICIT_VR[dicomKey(group, element)] || 'UN';
+    length = view.getUint32(p + 4, true);
+    valueOffset = p + 8;
+  }else{
+    vr = String.fromCharCode(view.getUint8(p + 4), view.getUint8(p + 5));
+    if(['OB', 'OW', 'OF', 'SQ', 'UT', 'UN'].includes(vr)){
+      length = view.getUint32(p + 8, true); valueOffset = p + 12;
+    }else{
+      length = view.getUint16(p + 6, true); valueOffset = p + 8;
+    }
+  }
+  return {group, element, key: dicomKey(group, element), vr, length, valueOffset};
+}
+// Only the leaf tags RTSTRUCT import actually needs; anything else is skipped
+// by the caller without being decoded.
+function dicomDecodeKnownLeaf(tags, h, view){
+  const {key, vr, length, valueOffset} = h;
+  if(key === '0008,0060' || key === '3006,0026' || key === '3006,0042'){
+    tags[key] = dicomReadCString(view, valueOffset, length);
+  }else if(key === '3006,0022' || key === '3006,0084' || key === '3006,0046'){
+    tags[key] = parseInt(dicomReadCString(view, valueOffset, length), 10);
+  }else if(key === '3006,002A' || key === '3006,0050'){
+    tags[key] = dicomReadCString(view, valueOffset, length).split('\\').map(Number);
+  }
+}
+// Parses a sequence's items starting at `contentStart` (`seqLength` is either
+// a byte count, or 0xFFFFFFFF for undefined length). Returns
+// {items: [{tagKey: value, ...}, ...], end: offsetPastTheWholeSequence} — each
+// item's tags include nested arrays of items for any SQ found inside it.
+function dicomReadSequenceItems(view, buffer, contentStart, seqLength, implicit){
+  const items = [];
+  let p = contentStart;
+  const definedEnd = (seqLength === 0xFFFFFFFF) ? null : contentStart + seqLength;
+  while(true){
+    if(definedEnd !== null && p >= definedEnd) return {items, end: definedEnd};
+    if(p + 8 > buffer.byteLength) return {items, end: p};
+    const ig = view.getUint16(p, true), ie = view.getUint16(p + 2, true);
+    const itemLen = view.getUint32(p + 4, true);
+    p += 8;
+    if(ig === 0xFFFE && ie === 0xE0DD) return {items, end: p};
+    if(ig !== 0xFFFE || ie !== 0xE000) return {items, end: p};   // malformed — bail
+    if(itemLen === 0xFFFFFFFF){
+      const r = dicomReadDatasetUntilItemDelim(view, buffer, p, implicit);
+      items.push(r.tags);
+      p = r.end;
+    }else{
+      items.push(dicomReadDatasetBounded(view, buffer, p, p + itemLen, implicit));
+      p += itemLen + (itemLen % 2);
+    }
+  }
+}
+function dicomReadDatasetUntilItemDelim(view, buffer, p, implicit){
+  const tags = {};
+  while(p + 8 <= buffer.byteLength){
+    const group = view.getUint16(p, true), element = view.getUint16(p + 2, true);
+    if(group === 0xFFFE && element === 0xE00D) return {tags, end: p + 8};
+    const h = dicomReadElementHeader(view, p, implicit);
+    if(h.vr === 'SQ'){
+      const seq = dicomReadSequenceItems(view, buffer, h.valueOffset, h.length, implicit);
+      tags[h.key] = seq.items;
+      p = seq.end;
+    }else if(h.length === 0xFFFFFFFF){
+      p = dicomSkipSequence(view, buffer, h.valueOffset, implicit);
+    }else{
+      dicomDecodeKnownLeaf(tags, h, view);
+      p = h.valueOffset + h.length + (h.length % 2);
+    }
+  }
+  return {tags, end: p};
+}
+function dicomReadDatasetBounded(view, buffer, p, endOffset, implicit){
+  const tags = {};
+  while(p < endOffset && p + 8 <= buffer.byteLength){
+    const h = dicomReadElementHeader(view, p, implicit);
+    if(h.vr === 'SQ'){
+      const seq = dicomReadSequenceItems(view, buffer, h.valueOffset, h.length, implicit);
+      tags[h.key] = seq.items;
+      p = seq.end;
+    }else if(h.length === 0xFFFFFFFF){
+      p = dicomSkipSequence(view, buffer, h.valueOffset, implicit);
+    }else{
+      dicomDecodeKnownLeaf(tags, h, view);
+      p = h.valueOffset + h.length + (h.length % 2);
+    }
+  }
+  return tags;
+}
+/* --- RT Structure Set: no PixelData at all — an ROI's shape lives entirely in
+   nested sequences (StructureSetROISequence for names, ROIContourSequence /
+   ContourSequence for the actual per-slice polygon point lists in patient mm
+   coordinates). Contours are matched to the loaded CT/MR volume's slices by Z
+   position (not by SOP Instance UID reference, which this parser doesn't
+   track) — consistent with this viewer's simplifying assumption of ordinary
+   axial acquisition throughout. */
+function parseRTStruct(buffer){
+  const view = new DataView(buffer);
+  if(buffer.byteLength < 132) throw new Error('file too small to be DICOM');
+  let offset = dicomReadCString(view, 128, 4) === 'DICM' ? 132 : 0;
+  let transferSyntaxUID = '1.2.840.10008.1.2.1';
+  let p = offset;
+  if(p + 8 <= buffer.byteLength && view.getUint16(p, true) === 0x0002){
+    while(p + 8 <= buffer.byteLength && view.getUint16(p, true) === 0x0002){
+      const group = view.getUint16(p, true), element = view.getUint16(p + 2, true);
+      const vr = String.fromCharCode(view.getUint8(p + 4), view.getUint8(p + 5));
+      let length, valueOffset;
+      if(['OB', 'OW', 'OF', 'SQ', 'UT', 'UN'].includes(vr)){
+        length = view.getUint32(p + 8, true); valueOffset = p + 12;
+      }else{
+        length = view.getUint16(p + 6, true); valueOffset = p + 8;
+      }
+      if(element === 0x0010) transferSyntaxUID = dicomReadCString(view, valueOffset, length);
+      p = valueOffset + length + (length % 2);
+    }
+  }
+  const syntax = DICOM_TRANSFER_SYNTAXES[transferSyntaxUID];
+  if(!syntax || syntax === 'rle'){
+    throw new Error(`unsupported transfer syntax (${transferSyntaxUID || 'unknown'}) for RTSTRUCT`);
+  }
+  if(syntax === 'explicit-be') throw new Error('Explicit VR Big Endian DICOM is not supported');
+  const implicit = syntax === 'implicit-le';
+
+  const rootTags = dicomReadDatasetBounded(view, buffer, p, buffer.byteLength, implicit);
+  const modality = rootTags['0008,0060'];
+  if(modality && modality !== 'RTSTRUCT'){
+    throw new Error(`this file's Modality is "${modality}", not RTSTRUCT`);
+  }
+
+  const roiNames = new Map();
+  for(const item of (rootTags['3006,0020'] || [])){
+    if(item['3006,0022'] != null) roiNames.set(item['3006,0022'], item['3006,0026'] || `ROI ${item['3006,0022']}`);
+  }
+  const rois = [];
+  for(const item of (rootTags['3006,0039'] || [])){
+    const num = item['3006,0084'];
+    const colorArr = item['3006,002A'];
+    const contours = [];
+    for(const c of (item['3006,0040'] || [])){
+      if(c['3006,0042'] && c['3006,0042'] !== 'CLOSED_PLANAR') continue;
+      const flat = c['3006,0050'];
+      if(!flat || flat.length < 9) continue;   // need at least 3 (x,y,z) points
+      const points = [];
+      for(let i = 0; i + 2 < flat.length; i += 3) points.push([flat[i], flat[i + 1], flat[i + 2]]);
+      contours.push(points);
+    }
+    if(contours.length === 0) continue;
+    const color = (colorArr && colorArr.length === 3)
+      ? '#' + colorArr.map(c => Math.max(0, Math.min(255, Math.round(c))).toString(16).padStart(2, '0')).join('')
+      : null;
+    rois.push({roiNumber: num, name: roiNames.get(num) || `ROI ${num}`, color, contours});
+  }
+  if(rois.length === 0) throw new Error('no usable ROI contours found in this RTSTRUCT file (only CLOSED_PLANAR contours are supported)');
+  return {modality, rois};
+}
+// Rasterizes every ROI's contours into a new structure's volMasks, aligned to
+// the loaded CT/MR volume by patient-space (mm) coordinates. Reuses the same
+// polygon rasterizer as Axial pencil drawing (mprPolygonRegion).
+function importRTStructAsStructures(rtstruct){
+  if(!dicomVolume) throw new Error('load a CT/MR series first (Upload → DICOM Series), then import the RTSTRUCT to align its contours');
+  pushUndo();
+  let imported = 0;
+  for(const roi of rtstruct.rois){
+    const volMasks = new Array(dicomVolume.numSlices).fill(null);
+    for(const contour of roi.contours){
+      if(contour.length < 3) continue;
+      const avgZ = contour.reduce((sum, pt) => sum + pt[2], 0) / contour.length;
+      const zIdx = Math.round((avgZ - dicomVolume.originZ) / dicomVolume.spacingZ);
+      if(zIdx < 0 || zIdx >= dicomVolume.numSlices) continue;
+      const pts = contour.map(([x, y]) => [
+        (x - dicomVolume.originX) / dicomVolume.spacingX,
+        (y - dicomVolume.originY) / dicomVolume.spacingY,
+      ]);
+      const region = mprPolygonRegion(pts, dicomVolume.cols, dicomVolume.rows);
+      if(!volMasks[zIdx]) volMasks[zIdx] = new Uint8Array(dicomVolume.cols * dicomVolume.rows);
+      mprApplyRegion(volMasks[zIdx], region, true, dicomVolume.cols, dicomVolume.rows);
+    }
+    if(volMasks.every(m => !m)) continue;
+    const s = makeStructure(roi.name, roi.color || PALETTE[structures.length % PALETTE.length], 'Other');
+    s.volMasks = volMasks;
+    structures.push(s);
+    imported++;
+  }
+  if(imported === 0) throw new Error('none of the ROI contours in this file aligned with the loaded CT/MR series');
+  activeIdx = structures.length - 1;
+  refreshUI();
+  return imported;
 }
 /* --- DICOM Native RLE Lossless (transfer syntax 1.2.840.10008.1.2.5, PS3.5
    Annex G) — a simple byte-oriented scheme, unlike JPEG/JPEG2000 which need a
@@ -2644,6 +2848,34 @@ async function loadDoseFromGoogleDrivePicker(){
     $('doseFromDriveBtn').textContent = prevLabel;
   }
 }
+async function loadRTStructFromBuffer(buf){
+  const rtstruct = parseRTStruct(buf);
+  return importRTStructAsStructures(rtstruct);
+}
+async function loadRTStructFromGoogleDrivePicker(){
+  $('rtstructFromDriveBtn').disabled = true;
+  const prevLabel = $('rtstructFromDriveBtn').textContent;
+  $('rtstructFromDriveBtn').textContent = 'Connecting…';
+  try{
+    await loadGoogleApis();
+    await ensureGoogleAuth();
+    let fileId;
+    try{
+      fileId = await showDrivePicker();
+    }catch(err){
+      if(err.message === 'cancelled') return;
+      throw err;
+    }
+    const buf = await downloadDriveFileById(fileId);
+    await loadRTStructFromBuffer(buf);
+    closeUploadMenu();
+  }catch(err){
+    alert('Could not load RTSTRUCT from Google Drive: ' + err.message);
+  }finally{
+    $('rtstructFromDriveBtn').disabled = false;
+    $('rtstructFromDriveBtn').textContent = prevLabel;
+  }
+}
 
 /* ============================ view / coordinates ============================ */
 function cssSize(){ const r = stage.getBoundingClientRect(); return [r.width, r.height]; }
@@ -3270,6 +3502,7 @@ function showUploadMenuView(view){
   $('uploadMenuDicom').style.display = view === 'dicom' ? 'flex' : 'none';
   $('uploadMenuSeries').style.display = view === 'series' ? 'flex' : 'none';
   $('uploadMenuDose').style.display = view === 'dose' ? 'flex' : 'none';
+  $('uploadMenuRTStruct').style.display = view === 'rtstruct' ? 'flex' : 'none';
 }
 function openUploadMenu(){
   showUploadMenuView('root');
@@ -3350,6 +3583,25 @@ $('doseFileInput').addEventListener('change', async () => {
   }
 });
 $('doseFromDriveBtn').addEventListener('click', loadDoseFromGoogleDrivePicker);
+$('uploadRTStructMenuBtn').addEventListener('click', () => showUploadMenuView('rtstruct'));
+$('rtstructBackBtn').addEventListener('click', () => showUploadMenuView('root'));
+$('rtstructFromFileBtn').addEventListener('click', () => {
+  closeUploadMenu();
+  $('rtstructFileInput').click();
+});
+$('rtstructFileInput').addEventListener('change', async () => {
+  const file = $('rtstructFileInput').files[0];
+  $('rtstructFileInput').value = '';
+  if(!file) return;
+  try{
+    const buf = await file.arrayBuffer();
+    await loadRTStructFromBuffer(buf);
+    closeUploadMenu();
+  }catch(err){
+    alert('Could not load RTSTRUCT file: ' + err.message);
+  }
+});
+$('rtstructFromDriveBtn').addEventListener('click', loadRTStructFromGoogleDrivePicker);
 $('mprDoseToggleBtn').addEventListener('click', () => setMprDoseVisible(!mprDoseVisible));
 $('mprDoseOpacity').addEventListener('input', () => setMprDoseOpacity(+$('mprDoseOpacity').value));
 $('mpr3dToggleBtn').addEventListener('click', () => setMprMode(!mprMode));
@@ -3470,6 +3722,8 @@ window.__sandbox = {
   get mprDoseOpacity(){ return mprDoseOpacity; },
   buildDoseVolumeFromDataset, doseColormap, sampleDoseAtPatientXYZ, getDoseOverlayCanvas,
   setMprDoseVisible, setMprDoseOpacity, installDoseVolume, loadDoseFromBuffer, loadDoseFromGoogleDrivePicker,
+  parseRTStruct, importRTStructAsStructures, loadRTStructFromBuffer, loadRTStructFromGoogleDrivePicker,
+  dicomReadSequenceItems, dicomReadDatasetBounded,
   refreshUI
 };
 </script>
