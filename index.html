@@ -121,6 +121,10 @@
     border-bottom:1px solid var(--border); background:var(--panel);}
   .mpr-toolbar input[type=number]{background:var(--panel2); color:var(--text);
     border:1px solid var(--border); border-radius:4px; padding:4px; font:inherit;}
+  .mpr-toolbar button{padding:6px 10px; background:var(--panel2); color:var(--text);
+    border:1px solid var(--border); border-radius:5px; cursor:pointer; font:inherit;}
+  .mpr-toolbar button.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
+  .mpr-toolbar button:not(.sel){background:#5c1f1f; border-color:#c0392b;}
   .mpr-grid{flex:1; display:flex; min-height:0;}
   .mpr-pane{flex:1; min-width:0; display:flex; flex-direction:column;
     border-right:1px solid var(--border);}
@@ -418,6 +422,7 @@
 
     <div id="stage3d" style="display:none">
       <div class="mpr-toolbar">
+        <button id="mprNavToggleBtn" class="sel" title="When on, dragging pans a view. When off, the active drawing tool (Pencil/Brush/Eraser) draws on the Axial slice instead.">View Control: On</button>
         <span class="glabel">Window</span>
         <label for="mprLevelInput">L</label>
         <input type="number" id="mprLevelInput" step="1" style="width:64px" title="Window Level (center)">
@@ -425,38 +430,41 @@
         <input type="number" id="mprWidthInput" step="1" min="1" style="width:64px" title="Window Width">
       </div>
       <div class="mpr-grid">
-        <div class="mpr-pane" data-plane="axial">
+        <div class="mpr-pane" id="mpr-pane-axial" data-plane="axial">
           <div class="mpr-hdr">
             <span>Axial</span><span class="mpr-idx" id="mpr-axial-idx">0/0</span>
             <button class="mpr-btn" id="mpr-axial-zoomout" title="Zoom out">&minus;</button>
             <button class="mpr-btn" id="mpr-axial-zoomin" title="Zoom in">+</button>
             <button class="mpr-btn" id="mpr-axial-fit" title="Fit">Fit</button>
+            <button class="mpr-btn" id="mpr-axial-maximize" title="Maximize this view">&#9974;</button>
           </div>
           <div class="mpr-canvaswrap"><canvas id="mpr-axial-canvas"></canvas></div>
           <input type="range" class="mpr-slider" id="mpr-axial-slider" min="0" max="0" value="0">
         </div>
-        <div class="mpr-pane" data-plane="coronal">
+        <div class="mpr-pane" id="mpr-pane-coronal" data-plane="coronal">
           <div class="mpr-hdr">
             <span>Coronal</span><span class="mpr-idx" id="mpr-coronal-idx">0/0</span>
             <button class="mpr-btn" id="mpr-coronal-zoomout" title="Zoom out">&minus;</button>
             <button class="mpr-btn" id="mpr-coronal-zoomin" title="Zoom in">+</button>
             <button class="mpr-btn" id="mpr-coronal-fit" title="Fit">Fit</button>
+            <button class="mpr-btn" id="mpr-coronal-maximize" title="Maximize this view">&#9974;</button>
           </div>
           <div class="mpr-canvaswrap"><canvas id="mpr-coronal-canvas"></canvas></div>
           <input type="range" class="mpr-slider" id="mpr-coronal-slider" min="0" max="0" value="0">
         </div>
-        <div class="mpr-pane" data-plane="sagittal">
+        <div class="mpr-pane" id="mpr-pane-sagittal" data-plane="sagittal">
           <div class="mpr-hdr">
             <span>Sagittal</span><span class="mpr-idx" id="mpr-sagittal-idx">0/0</span>
             <button class="mpr-btn" id="mpr-sagittal-zoomout" title="Zoom out">&minus;</button>
             <button class="mpr-btn" id="mpr-sagittal-zoomin" title="Zoom in">+</button>
             <button class="mpr-btn" id="mpr-sagittal-fit" title="Fit">Fit</button>
+            <button class="mpr-btn" id="mpr-sagittal-maximize" title="Maximize this view">&#9974;</button>
           </div>
           <div class="mpr-canvaswrap"><canvas id="mpr-sagittal-canvas"></canvas></div>
           <input type="range" class="mpr-slider" id="mpr-sagittal-slider" min="0" max="0" value="0">
         </div>
       </div>
-      <div class="mpr-hint">Scroll: change slice &middot; Ctrl/Cmd+scroll: zoom &middot; Drag: pan</div>
+      <div class="mpr-hint">Scroll: change slice &middot; Ctrl/Cmd+scroll: zoom &middot; Drag: pan (View Control on) or draw on Axial (View Control off + Pencil/Brush/Eraser)</div>
     </div>
   </div>
 
@@ -544,6 +552,7 @@ function makeStructure(name, color, type, id){
   return {
     name, color, visible: true, mask: new Uint8Array(W * H), cache: c, dirty: true,
     type: type || 'Other', id: id != null ? id : String(++structIdCounter),
+    volMasks: null,   // per-axial-slice masks for the loaded 3D series, or null until drawn on
   };
 }
 function addStructure(name, type){
@@ -717,7 +726,8 @@ function snapshot(){
     structCounter, structIdCounter,
     structures: structures.map(s => ({
       name: s.name, color: s.color, visible: s.visible, type: s.type, id: s.id,
-      mask: new Uint8Array(s.mask)
+      mask: new Uint8Array(s.mask),
+      volMasks: s.volMasks ? s.volMasks.map(m => m ? new Uint8Array(m) : null) : null,
     }))
   };
 }
@@ -729,6 +739,7 @@ function restore(snap){
     const t = makeStructure(s.name, s.color, s.type, s.id);
     t.visible = s.visible;
     t.mask.set(s.mask);
+    t.volMasks = s.volMasks ? s.volMasks.map(m => m ? new Uint8Array(m) : null) : null;
     return t;
   });
 }
@@ -1775,12 +1786,21 @@ async function loadDicomFromGoogleDrivePicker(){
 /* ============================ 3D series / MPR viewer ============================
    Builds a volume from a folder of same-series DICOM slices and renders three
    independent orthogonal panes (Axial/Coronal/Sagittal), each with its own
-   pan/zoom/scroll. Read-only reference viewer — a separate mode from the
-   single-image 2D contouring canvas, which is untouched by any of this. */
+   pan/zoom/scroll, plus per-slice Pencil/Brush/Eraser drawing on the Axial
+   pane only (Coronal/Sagittal stay read-only reference views). Structures
+   store this as `volMasks`, a per-axial-slice-index array of masks sized to
+   the volume's resolution — separate from `mask`, the single 2D-canvas mask,
+   which this mode never touches. */
 let dicomVolume = null;   // {cols, rows, numSlices, data, spacingX, spacingY, spacingZ, minVal, maxVal, defaultCenter, defaultWidth}
 let mprMode = false;
+let mprMaximized = null;   // null, or the plane currently filling the whole grid
+let mpr3dNavMode = true;   // true: drag pans; false: the active drawing tool draws on Axial
+let mprDrag = null;        // in-progress Axial draw stroke: {kind:'pencil'|'stamp', z, ...}
 let mprWindowCenter = 0, mprWindowWidth = 1;
 const MPR_PLANES = ['axial', 'coronal', 'sagittal'];
+const MPR_DRAWABLE_TOOLS = ['pencil', 'brush', 'eraser'];
+const mprPolyCv = document.createElement('canvas');
+const mprPolyCtx = mprPolyCv.getContext('2d', {willReadFrequently: true});
 const mprView = {
   axial: {index: 0, scale: 1, tx: 0, ty: 0},
   coronal: {index: 0, scale: 1, tx: 0, ty: 0},
@@ -1942,6 +1962,96 @@ function fitMprPane(plane){
   pv.tx = (cw - physW * scale) / 2;
   pv.ty = (ch - physH * scale) / 2;
 }
+// Width/height-parameterized siblings of polygonRegion/applyRegion/stampDisc/
+// stampSegment (mask math, above), kept separate from those so Axial drawing
+// (arbitrary volume resolution) never touches the 2D canvas's fixed-W/H code.
+function mprPolygonRegion(pts, w, h){
+  mprPolyCv.width = w; mprPolyCv.height = h;
+  mprPolyCtx.clearRect(0, 0, w, h);
+  mprPolyCtx.fillStyle = '#fff';
+  mprPolyCtx.beginPath();
+  mprPolyCtx.moveTo(pts[0][0], pts[0][1]);
+  for(let i = 1; i < pts.length; i++) mprPolyCtx.lineTo(pts[i][0], pts[i][1]);
+  mprPolyCtx.closePath();
+  mprPolyCtx.fill();
+  const d = mprPolyCtx.getImageData(0, 0, w, h).data;
+  const reg = new Uint8Array(w * h);
+  for(let i = 0; i < w * h; i++) reg[i] = d[i * 4 + 3] >= 128 ? 1 : 0;
+  return reg;
+}
+function mprApplyRegion(mask, region, add, w, h){
+  for(let i = 0; i < w * h; i++) if(region[i]) mask[i] = add ? 1 : 0;
+}
+function mprStampDisc(mask, cx, cy, diameter, val, w, h){
+  const r = diameter / 2, r2 = r * r;
+  const xa = Math.max(0, Math.floor(cx - r)), xb = Math.min(w - 1, Math.ceil(cx + r));
+  const ya = Math.max(0, Math.floor(cy - r)), yb = Math.min(h - 1, Math.ceil(cy + r));
+  for(let y = ya; y <= yb; y++){
+    const dy = y + 0.5 - cy;
+    for(let x = xa; x <= xb; x++){
+      const dx = x + 0.5 - cx;
+      if(dx * dx + dy * dy <= r2) mask[y * w + x] = val;
+    }
+  }
+}
+function mprStampSegment(mask, x0, y0, x1, y1, diameter, val, w, h){
+  const dist = Math.hypot(x1 - x0, y1 - y0);
+  const steps = Math.max(1, Math.ceil(dist / Math.max(1, diameter / 4)));
+  for(let i = 0; i <= steps; i++){
+    const t = i / steps;
+    mprStampDisc(mask, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, diameter, val, w, h);
+  }
+}
+// Gets (optionally creating) a structure's mask for one axial slice, sized to
+// the current volume. Resets to a fresh per-slice array if the volume changed.
+function getVolMask(structure, z, create){
+  if(!structure.volMasks || structure.volMasks.length !== dicomVolume.numSlices){
+    structure.volMasks = new Array(dicomVolume.numSlices).fill(null);
+  }
+  if(!structure.volMasks[z] && create) structure.volMasks[z] = new Uint8Array(dicomVolume.cols * dicomVolume.rows);
+  return structure.volMasks[z];
+}
+// Reuses the shared Brush/Eraser diameter slider (calibrated in px at the 2D
+// canvas's fixed PX_PER_MM), converted through real mm to volume voxels so
+// the same physical brush size feels consistent between 2D and 3D modes.
+function mprBrushDiameterVoxels(){
+  const px = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
+  const mm = px / PX_PER_MM;
+  const avgSpacing = ((dicomVolume.spacingX + dicomVolume.spacingY) / 2) || 1;
+  return Math.max(1, mm / avgSpacing);
+}
+function eventPosIn(canvas, e){
+  const r = canvas.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+// Screen (CSS px, relative to the Axial canvas) -> Axial voxel coordinates.
+function axialScreenToVoxel(sx, sy){
+  const pv = mprView.axial;
+  const [sw, sh] = mprPlaneSpacing('axial');
+  return [(sx - pv.tx) / (pv.scale * sw), (sy - pv.ty) / (pv.scale * sh)];
+}
+// Translucent fill + opaque outline for one structure's mask, at slice
+// resolution (matches rebuildCache's look, but width/height-parameterized).
+function mprMaskOverlayCanvas(mask, w, h, color){
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cx = c.getContext('2d');
+  const img = cx.createImageData(w, h);
+  const [r, g, b] = hexToRgb(color);
+  const d = img.data;
+  for(let y = 0; y < h; y++){
+    for(let x = 0; x < w; x++){
+      const i = y * w + x;
+      if(!mask[i]) continue;
+      const edge = x === 0 || y === 0 || x === w - 1 || y === h - 1 ||
+                   !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w];
+      const o = i * 4;
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = edge ? 255 : 80;
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  return c;
+}
 function renderMprPane(plane){
   const canvas = $(`mpr-${plane}-canvas`);
   const wrap = canvas.parentElement;
@@ -1966,8 +2076,58 @@ function renderMprPane(plane){
   const dw = slice.width * sw * pv.scale, dh = slice.height * sh * pv.scale;
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(off, pv.tx, pv.ty, dw, dh);
+
+  if(plane !== 'axial') return;
+  for(const s of structures){
+    if(!s.visible) continue;
+    const mask = s.volMasks && s.volMasks[pv.index];
+    if(!mask) continue;
+    const overlay = mprMaskOverlayCanvas(mask, dicomVolume.cols, dicomVolume.rows, s.color);
+    ctx.drawImage(overlay, pv.tx, pv.ty, dw, dh);
+  }
+  if(mprDrag && mprDrag.kind === 'pencil' && mprDrag.pts.length > 1){
+    const toScr = p => [p[0] * sw * pv.scale + pv.tx, p[1] * sh * pv.scale + pv.ty];
+    ctx.beginPath();
+    const p0 = toScr(mprDrag.pts[0]);
+    ctx.moveTo(p0[0], p0[1]);
+    for(let i = 1; i < mprDrag.pts.length; i++){
+      const p = toScr(mprDrag.pts[i]);
+      ctx.lineTo(p[0], p[1]);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = getRadio('pencil-mode') === 'add' ? '#7cfc7c' : '#ff6b6b';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
 }
 function renderAllMprPanes(){ MPR_PLANES.forEach(renderMprPane); }
+// Toggles pan/zoom controls vs. Axial drawing. Auto-disabled by setTool()
+// whenever a drawable tool (Pencil/Brush/Eraser) is selected.
+function setMpr3dNavMode(on){
+  mpr3dNavMode = on;
+  $('mprNavToggleBtn').classList.toggle('sel', on);
+  $('mprNavToggleBtn').textContent = on ? 'View Control: On' : 'View Control: Off';
+  $('mpr-axial-canvas').style.cursor = on ? 'grab' : 'crosshair';
+}
+function isMprAxialDrawing(){
+  return !mpr3dNavMode && !!dicomVolume && MPR_DRAWABLE_TOOLS.includes(tool) && activeIdx >= 0;
+}
+// Maximizes one pane to fill the whole grid (hiding the other two), or
+// restores the normal 3-pane layout if the same plane is toggled again.
+function toggleMprMaximize(plane){
+  mprMaximized = (mprMaximized === plane) ? null : plane;
+  MPR_PLANES.forEach(p => {
+    $(`mpr-pane-${p}`).style.display = (!mprMaximized || mprMaximized === p) ? 'flex' : 'none';
+    $(`mpr-${p}-maximize`).textContent = (mprMaximized === p) ? 'Restore' : '⛶';
+    $(`mpr-${p}-maximize`).title = (mprMaximized === p) ? 'Restore 3-pane view' : 'Maximize this view';
+    $(`mpr-${p}-maximize`).classList.toggle('sel', mprMaximized === p);
+  });
+  requestAnimationFrame(() => {
+    fitMprPane(plane);
+    renderAllMprPanes();
+    updateMprSliceUI(plane);
+  });
+}
 function setMprMode(on){
   mprMode = on;
   $('stage').style.display = on ? 'none' : 'block';
@@ -2001,17 +2161,60 @@ function mprPaneInteraction(plane){
   let dragging = false, lastX = 0, lastY = 0;
   canvas.addEventListener('pointerdown', (e) => {
     if(!dicomVolume) return;
+    if(plane === 'axial' && isMprAxialDrawing()){
+      canvas.setPointerCapture(e.pointerId);
+      const [vx, vy] = axialScreenToVoxel(...eventPosIn(canvas, e));
+      const z = mprView.axial.index;
+      const s = structures[activeIdx];
+      pushUndo();
+      if(tool === 'pencil'){
+        mprDrag = {kind: 'pencil', z, pts: [[vx, vy]]};
+      }else{
+        const val = (tool === 'brush' && getRadio('brush-mode') === 'paint') ? 1 : 0;
+        const dia = mprBrushDiameterVoxels();
+        const mask = getVolMask(s, z, true);
+        mprStampDisc(mask, vx, vy, dia, val, dicomVolume.cols, dicomVolume.rows);
+        mprDrag = {kind: 'stamp', z, lastX: vx, lastY: vy, val, dia};
+      }
+      renderMprPane('axial');
+      return;
+    }
     dragging = true; lastX = e.clientX; lastY = e.clientY;
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
+    if(mprDrag){
+      const [vx, vy] = axialScreenToVoxel(...eventPosIn(canvas, e));
+      const s = structures[activeIdx];
+      if(mprDrag.kind === 'pencil'){
+        mprDrag.pts.push([vx, vy]);
+      }else if(mprDrag.kind === 'stamp' && s){
+        const mask = getVolMask(s, mprDrag.z, true);
+        mprStampSegment(mask, mprDrag.lastX, mprDrag.lastY, vx, vy, mprDrag.dia, mprDrag.val, dicomVolume.cols, dicomVolume.rows);
+        mprDrag.lastX = vx; mprDrag.lastY = vy;
+      }
+      renderMprPane('axial');
+      return;
+    }
     if(!dragging) return;
     const pv = mprView[plane];
     pv.tx += e.clientX - lastX; pv.ty += e.clientY - lastY;
     lastX = e.clientX; lastY = e.clientY;
     renderMprPane(plane);
   });
-  const endDrag = () => { dragging = false; };
+  const endDrag = () => {
+    if(mprDrag){
+      if(mprDrag.kind === 'pencil' && mprDrag.pts.length > 2 && activeIdx >= 0){
+        const s = structures[activeIdx];
+        const mask = getVolMask(s, mprDrag.z, true);
+        const region = mprPolygonRegion(mprDrag.pts, dicomVolume.cols, dicomVolume.rows);
+        mprApplyRegion(mask, region, getRadio('pencil-mode') === 'add', dicomVolume.cols, dicomVolume.rows);
+      }
+      mprDrag = null;
+      renderMprPane('axial');
+    }
+    dragging = false;
+  };
   canvas.addEventListener('pointerup', endDrag);
   canvas.addEventListener('pointercancel', endDrag);
   $(`mpr-${plane}-slider`).addEventListener('input', () => {
@@ -2022,6 +2225,7 @@ function mprPaneInteraction(plane){
   $(`mpr-${plane}-fit`).addEventListener('click', () => { fitMprPane(plane); renderMprPane(plane); });
   $(`mpr-${plane}-zoomin`).addEventListener('click', () => { mprView[plane].scale *= 1.25; renderMprPane(plane); });
   $(`mpr-${plane}-zoomout`).addEventListener('click', () => { mprView[plane].scale /= 1.25; renderMprPane(plane); });
+  $(`mpr-${plane}-maximize`).addEventListener('click', () => toggleMprMaximize(plane));
 }
 // Installs the freshly-built volume as the active 3D series and enters 3D mode.
 function installDicomVolume(vol){
@@ -2474,6 +2678,9 @@ function setTool(t){
     b.classList.toggle('sel', b.dataset.tool === t));
   document.querySelectorAll('.panel').forEach(p =>
     p.classList.toggle('show', p.id === 'set-' + t));
+  // Picking a drawing tool switches the 3D view out of pan/zoom mode so the
+  // same drag gesture draws on the Axial pane instead.
+  if(MPR_DRAWABLE_TOOLS.includes(t)) setMpr3dNavMode(false);
   refreshToolPreviews();
   updateStatus();
   scheduleDraw();
@@ -2801,6 +3008,7 @@ $('dicomFolderInput').addEventListener('change', async () => {
 });
 $('seriesFromDriveBtn').addEventListener('click', loadDicomSeriesFromGoogleDrivePicker);
 $('mpr3dToggleBtn').addEventListener('click', () => setMprMode(!mprMode));
+$('mprNavToggleBtn').addEventListener('click', () => setMpr3dNavMode(!mpr3dNavMode));
 $('mprLevelInput').addEventListener('input', applyMprWindowLevel);
 $('mprWidthInput').addEventListener('input', applyMprWindowLevel);
 MPR_PLANES.forEach(mprPaneInteraction);
@@ -2905,6 +3113,12 @@ window.__sandbox = {
   fitMprPane, renderMprPane, renderAllMprPanes, setMprMode, applyMprWindowLevel,
   installDicomVolume, parseDicomFilesLoosely, loadDicomSeriesFromFiles,
   showDriveFolderPicker, listDriveFolderFiles, loadDicomSeriesFromGoogleDrivePicker,
+  get mprMaximized(){ return mprMaximized; },
+  get mpr3dNavMode(){ return mpr3dNavMode; },
+  get mprDrag(){ return mprDrag; },
+  setMpr3dNavMode, toggleMprMaximize, isMprAxialDrawing,
+  getVolMask, mprPolygonRegion, mprApplyRegion, mprStampDisc, mprStampSegment,
+  mprBrushDiameterVoxels, axialScreenToVoxel, mprMaskOverlayCanvas,
   refreshUI
 };
 </script>
