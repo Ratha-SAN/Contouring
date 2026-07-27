@@ -39,6 +39,26 @@
   #zoomControls{display:flex; align-items:center; gap:6px;}
   #zoomToggleBtn.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
 
+  /* Upload dropdown: single "Upload" button revealing Image/DICOM choices,
+     with DICOM drilling into a From-file / From-link sub-view. */
+  #uploadWrap{position:relative; display:inline-block;}
+  #uploadBtn.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
+  #uploadMenu{display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:20;
+    background:var(--panel2); border:1px solid var(--border); border-radius:6px;
+    box-shadow:0 6px 18px rgba(0,0,0,.45); min-width:170px; padding:4px;}
+  #uploadMenu.show{display:block;}
+  .menu-view{display:flex; flex-direction:column; gap:2px;}
+  .menu-item{width:100%; text-align:left; background:none; border:none; color:var(--text);
+    padding:7px 10px; border-radius:4px; cursor:pointer; font:inherit; white-space:nowrap;}
+  .menu-item:hover{background:var(--panel);}
+  .menu-item.menu-back{color:var(--dim); font-size:12px; border-bottom:1px solid var(--border);
+    border-radius:0; margin-bottom:2px; padding-bottom:6px;}
+  .menu-link-row{display:flex; gap:4px; padding:4px 2px 2px;}
+  .menu-link-row input{flex:1; width:170px; background:var(--panel); color:var(--text);
+    border:1px solid var(--border); border-radius:4px; padding:5px; font:inherit;}
+  .menu-link-row button{background:#0d5c85; color:#fff; border:1px solid var(--accent);
+    border-radius:4px; padding:5px 8px; cursor:pointer; font:inherit;}
+
   /* left toolbar + settings */
   #toolbar{
     width:210px; background:var(--panel); border-right:1px solid var(--border);
@@ -324,17 +344,31 @@
       </div>
       <div class="topgroup">
         <span class="glabel">Background</span>
-        <button id="uploadImageBtn">Image&hellip;</button>
-        <button id="uploadDicomBtn">DICOM&hellip;</button>
+        <div id="uploadWrap">
+          <button id="uploadBtn" title="Upload a background image or DICOM" aria-haspopup="true" aria-expanded="false">&#128228; Upload</button>
+          <div id="uploadMenu">
+            <div id="uploadMenuRoot" class="menu-view">
+              <button id="uploadImageBtn" class="menu-item">Image&hellip;</button>
+              <button id="uploadDicomMenuBtn" class="menu-item">DICOM &#9656;</button>
+            </div>
+            <div id="uploadMenuDicom" class="menu-view" style="display:none">
+              <button id="dicomBackBtn" class="menu-item menu-back">&#9666; Back</button>
+              <button id="dicomFromFileBtn" class="menu-item">From file&hellip;</button>
+              <button id="dicomFromLinkBtn" class="menu-item">From link&hellip;</button>
+            </div>
+            <div id="uploadMenuLink" class="menu-view" style="display:none">
+              <button id="linkBackBtn" class="menu-item menu-back">&#9666; Back</button>
+              <div class="menu-link-row">
+                <input type="text" id="driveLinkInput" placeholder="Google Drive DICOM link">
+                <button id="driveLoadBtn">Load</button>
+              </div>
+            </div>
+          </div>
+        </div>
         <button id="bgToggleBtn" disabled>Hide</button>
         <button id="bgClearBtn" disabled>Clear</button>
         <input type="file" id="imageFileInput" accept="image/*" style="display:none">
         <input type="file" id="dicomFileInput" accept=".dcm,application/dicom" style="display:none">
-      </div>
-      <div class="topgroup">
-        <span class="glabel">Drive</span>
-        <input type="text" id="driveLinkInput" placeholder="Google Drive DICOM link" style="width:220px">
-        <button id="driveLoadBtn">Load</button>
       </div>
       <div class="topgroup">
         <span class="glabel">Window</span>
@@ -2206,7 +2240,39 @@ $('batchUnionBtn').addEventListener('click', batchUnionToNew);
 $('batchDeleteBtn').addEventListener('click', batchDelete);
 $('exportPngBtn').addEventListener('click', exportPNG);
 $('exportJsonBtn').addEventListener('click', exportJSON);
-$('uploadImageBtn').addEventListener('click', () => $('imageFileInput').click());
+/* upload dropdown: Upload -> {Image, DICOM -> {From file, From link}} */
+function showUploadMenuView(view){
+  $('uploadMenuRoot').style.display = view === 'root' ? 'flex' : 'none';
+  $('uploadMenuDicom').style.display = view === 'dicom' ? 'flex' : 'none';
+  $('uploadMenuLink').style.display = view === 'link' ? 'flex' : 'none';
+}
+function openUploadMenu(){
+  showUploadMenuView('root');
+  $('uploadMenu').classList.add('show');
+  $('uploadBtn').classList.add('sel');
+  $('uploadBtn').setAttribute('aria-expanded', 'true');
+}
+function closeUploadMenu(){
+  $('uploadMenu').classList.remove('show');
+  $('uploadBtn').classList.remove('sel');
+  $('uploadBtn').setAttribute('aria-expanded', 'false');
+  showUploadMenuView('root');
+}
+$('uploadBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if($('uploadMenu').classList.contains('show')) closeUploadMenu();
+  else openUploadMenu();
+});
+document.addEventListener('click', (e) => {
+  if(!$('uploadWrap').contains(e.target)) closeUploadMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if(e.key === 'Escape' && $('uploadMenu').classList.contains('show')) closeUploadMenu();
+});
+$('uploadImageBtn').addEventListener('click', () => {
+  closeUploadMenu();
+  $('imageFileInput').click();
+});
 $('imageFileInput').addEventListener('change', async () => {
   const file = $('imageFileInput').files[0];
   $('imageFileInput').value = '';
@@ -2220,7 +2286,17 @@ $('imageFileInput').addEventListener('change', async () => {
     alert('Could not load image: ' + err.message);
   }
 });
-$('uploadDicomBtn').addEventListener('click', () => $('dicomFileInput').click());
+$('uploadDicomMenuBtn').addEventListener('click', () => showUploadMenuView('dicom'));
+$('dicomBackBtn').addEventListener('click', () => showUploadMenuView('root'));
+$('dicomFromFileBtn').addEventListener('click', () => {
+  closeUploadMenu();
+  $('dicomFileInput').click();
+});
+$('dicomFromLinkBtn').addEventListener('click', () => {
+  showUploadMenuView('link');
+  $('driveLinkInput').focus();
+});
+$('linkBackBtn').addEventListener('click', () => showUploadMenuView('dicom'));
 $('dicomFileInput').addEventListener('change', async () => {
   const file = $('dicomFileInput').files[0];
   $('dicomFileInput').value = '';
@@ -2244,6 +2320,7 @@ async function loadDicomFromDriveLink(){
   try{
     const buf = await fetchDriveFileBuffer(url);
     applyDicomBuffer(buf);
+    closeUploadMenu();
   }catch(err){
     currentDicomImage = null;
     updateWindowLevelInputs();
@@ -2328,6 +2405,7 @@ window.__sandbox = {
   setBackgroundFromImageLike, setBackgroundFromDicomImageData,
   updateWindowLevelInputs, applyWindowLevel,
   applyDicomBuffer, extractDriveFileId, fetchDriveFileBuffer, loadDicomFromDriveLink,
+  openUploadMenu, closeUploadMenu, showUploadMenuView,
   refreshUI
 };
 </script>
