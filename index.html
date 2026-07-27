@@ -40,7 +40,7 @@
   #zoomToggleBtn.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
 
   /* Upload dropdown: single "Upload" button revealing Image/DICOM choices,
-     with DICOM drilling into a From-file / From-link sub-view. */
+     with DICOM drilling into a From-file / From-Drive sub-view. */
   #uploadWrap{position:relative; display:inline-block;}
   #uploadBtn.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
   #uploadMenu{display:none; position:absolute; top:calc(100% + 4px); left:0; z-index:20;
@@ -51,13 +51,9 @@
   .menu-item{width:100%; text-align:left; background:none; border:none; color:var(--text);
     padding:7px 10px; border-radius:4px; cursor:pointer; font:inherit; white-space:nowrap;}
   .menu-item:hover{background:var(--panel);}
+  .menu-item:disabled{opacity:.5; cursor:default;}
   .menu-item.menu-back{color:var(--dim); font-size:12px; border-bottom:1px solid var(--border);
     border-radius:0; margin-bottom:2px; padding-bottom:6px;}
-  .menu-link-row{display:flex; gap:4px; padding:4px 2px 2px;}
-  .menu-link-row input{flex:1; width:170px; background:var(--panel); color:var(--text);
-    border:1px solid var(--border); border-radius:4px; padding:5px; font:inherit;}
-  .menu-link-row button{background:#0d5c85; color:#fff; border:1px solid var(--accent);
-    border-radius:4px; padding:5px 8px; cursor:pointer; font:inherit;}
 
   /* left toolbar + settings */
   #toolbar{
@@ -354,14 +350,7 @@
             <div id="uploadMenuDicom" class="menu-view" style="display:none">
               <button id="dicomBackBtn" class="menu-item menu-back">&#9666; Back</button>
               <button id="dicomFromFileBtn" class="menu-item">From file&hellip;</button>
-              <button id="dicomFromLinkBtn" class="menu-item">From link&hellip;</button>
-            </div>
-            <div id="uploadMenuLink" class="menu-view" style="display:none">
-              <button id="linkBackBtn" class="menu-item menu-back">&#9666; Back</button>
-              <div class="menu-link-row">
-                <input type="text" id="driveLinkInput" placeholder="Google Drive DICOM link">
-                <button id="driveLoadBtn">Load</button>
-              </div>
+              <button id="dicomFromDriveBtn" class="menu-item">From Drive&hellip;</button>
             </div>
           </div>
         </div>
@@ -1580,48 +1569,115 @@ function applyDicomBuffer(buf){
   updateWindowLevelInputs(center, width);
   setBackgroundFromDicomImageData(windowToImageData(currentDicomImage, center, width));
 }
-// Pulls a Google Drive file ID out of a share link, an "open?id=" link, a direct
-// "uc?id=" link, or a bare file ID pasted directly.
-function extractDriveFileId(input){
-  const s = String(input).trim();
-  let m = s.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
-  if(m) return m[1];
-  m = s.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-  if(m) return m[1];
-  m = s.match(/\/d\/([a-zA-Z0-9_-]+)/);
-  if(m) return m[1];
-  if(/^[a-zA-Z0-9_-]{10,}$/.test(s)) return s;
-  return null;
+/* --- Google Drive: native Picker + OAuth, replacing a plain share-link fetch.
+   Google Drive's direct-download link only works when a browser navigates to it —
+   it isn't CORS-enabled for cross-origin fetch(), so client-side JS on another
+   origin can't pull bytes from it. The Picker + Drive API v3 path below is the
+   supported way to do this: the user signs in and picks a file via Google's own
+   UI, and the file is then fetched from googleapis.com with a Bearer token,
+   which is CORS-enabled. Requires a Google Cloud OAuth Client ID + API key
+   scoped to this page's origin; only works when that origin matches (i.e. the
+   GitHub Pages deployment, not the file:// or Claude Artifact previews, and
+   only once the external Google scripts have actually loaded). */
+const GOOGLE_API_KEY = 'AIzaSyArwr8GJPNBVp769gs_ua4TYsr-Va2P1pA';
+const GOOGLE_CLIENT_ID = '934007657564-1nd7gah3o36emheuiukmmtdof1glp71r.apps.googleusercontent.com';
+const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
+let googleAccessToken = null;
+let googleTokenClient = null;
+let googleApisLoadPromise = null;
+function loadScriptOnce(src){
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`failed to load ${src}`));
+    document.head.appendChild(s);
+  });
 }
-// Fetches a DICOM file's raw bytes from a Google Drive share link. Only works for
-// files shared as "Anyone with the link" — Drive does not expose CORS-friendly
-// direct downloads for private files from arbitrary origins without OAuth.
-async function fetchDriveFileBuffer(shareUrl){
-  if(/\/drive\/(u\/\d+\/)?folders\//.test(String(shareUrl))){
-    throw new Error('that looks like a Google Drive folder link, not a file link — open the DICOM ' +
-      'file inside the folder and copy its "Share" link instead (right-click the file → Share → Copy link)');
+// Lazily loads the Google API loader + Picker, and Google Identity Services —
+// only fetched the first time the user actually asks to pick a Drive file.
+function loadGoogleApis(){
+  if(!googleApisLoadPromise){
+    googleApisLoadPromise = Promise.all([
+      loadScriptOnce('https://apis.google.com/js/api.js').then(() => new Promise((resolve, reject) => {
+        window.gapi.load('picker', {callback: resolve, onerror: () => reject(new Error('failed to load the Google Picker'))});
+      })),
+      loadScriptOnce('https://accounts.google.com/gsi/client'),
+    ]);
   }
-  const id = extractDriveFileId(shareUrl);
-  if(!id) throw new Error('could not find a Google Drive file ID in that link');
-  const downloadUrl = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(id)}`;
-  let resp;
+  return googleApisLoadPromise;
+}
+// Requests (or reuses) an OAuth access token via Google Identity Services' token client.
+function ensureGoogleAuth(){
+  return new Promise((resolve, reject) => {
+    if(googleAccessToken){ resolve(googleAccessToken); return; }
+    if(!googleTokenClient){
+      googleTokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID, scope: GOOGLE_DRIVE_SCOPE, callback: () => {},
+      });
+    }
+    googleTokenClient.callback = (resp) => {
+      if(resp.error){ reject(new Error(`Google sign-in failed (${resp.error})`)); return; }
+      googleAccessToken = resp.access_token;
+      resolve(googleAccessToken);
+    };
+    googleTokenClient.requestAccessToken({prompt: ''});
+  });
+}
+// Opens Google's own file-browser popup; resolves with the picked file's ID,
+// or rejects with a plain Error('cancelled') if the user closes it without picking.
+function showDrivePicker(){
+  return new Promise((resolve, reject) => {
+    const view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+      .setIncludeFolders(true).setSelectFolderEnabled(false);
+    const picker = new google.picker.PickerBuilder()
+      .addView(view)
+      .setOAuthToken(googleAccessToken)
+      .setDeveloperKey(GOOGLE_API_KEY)
+      .setCallback((data) => {
+        if(data.action === google.picker.Action.PICKED) resolve(data.docs[0].id);
+        else if(data.action === google.picker.Action.CANCEL) reject(new Error('cancelled'));
+      })
+      .build();
+    picker.setVisible(true);
+  });
+}
+// Downloads a Drive file's raw bytes via the Drive API (CORS-enabled, unlike the
+// plain drive.google.com download link), authenticated with the OAuth token.
+async function downloadDriveFileById(fileId){
+  const resp = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`,
+    {headers: {Authorization: `Bearer ${googleAccessToken}`}});
+  if(!resp.ok) throw new Error(`Google Drive returned HTTP ${resp.status}`);
+  return resp.arrayBuffer();
+}
+// Full "From Drive" flow: load the Google scripts (first use only), sign in,
+// show the picker, download the chosen file, and apply it as the background.
+async function loadDicomFromGoogleDrivePicker(){
+  $('dicomFromDriveBtn').disabled = true;
+  const prevLabel = $('dicomFromDriveBtn').textContent;
+  $('dicomFromDriveBtn').textContent = 'Connecting…';
   try{
-    resp = await fetch(downloadUrl);
+    await loadGoogleApis();
+    await ensureGoogleAuth();
+    let fileId;
+    try{
+      fileId = await showDrivePicker();
+    }catch(err){
+      if(err.message === 'cancelled') return;
+      throw err;
+    }
+    const buf = await downloadDriveFileById(fileId);
+    applyDicomBuffer(buf);
+    closeUploadMenu();
   }catch(err){
-    throw new Error('could not reach Google Drive (network/CORS error) — make sure the file is ' +
-      'shared as "Anyone with the link", or download it and use the DICOM… button instead');
+    currentDicomImage = null;
+    updateWindowLevelInputs();
+    alert('Could not load DICOM from Google Drive: ' + err.message);
+  }finally{
+    $('dicomFromDriveBtn').disabled = false;
+    $('dicomFromDriveBtn').textContent = prevLabel;
   }
-  if(!resp.ok) throw new Error(`Google Drive returned HTTP ${resp.status} — check the link and sharing permissions`);
-  const buf = await resp.arrayBuffer();
-  const head = new Uint8Array(buf.slice(0, 256));
-  let headStr = '';
-  for(let i = 0; i < head.length; i++) headStr += String.fromCharCode(head[i]);
-  headStr = headStr.toLowerCase();
-  if(headStr.includes('<html') || headStr.includes('<!doctype')){
-    throw new Error('Google Drive returned a confirmation page instead of the file (common for large ' +
-      'files or restricted sharing) — download it manually and use the DICOM… button instead');
-  }
-  return buf;
 }
 
 /* ============================ view / coordinates ============================ */
@@ -2240,11 +2296,10 @@ $('batchUnionBtn').addEventListener('click', batchUnionToNew);
 $('batchDeleteBtn').addEventListener('click', batchDelete);
 $('exportPngBtn').addEventListener('click', exportPNG);
 $('exportJsonBtn').addEventListener('click', exportJSON);
-/* upload dropdown: Upload -> {Image, DICOM -> {From file, From link}} */
+/* upload dropdown: Upload -> {Image, DICOM -> {From file, From Drive}} */
 function showUploadMenuView(view){
   $('uploadMenuRoot').style.display = view === 'root' ? 'flex' : 'none';
   $('uploadMenuDicom').style.display = view === 'dicom' ? 'flex' : 'none';
-  $('uploadMenuLink').style.display = view === 'link' ? 'flex' : 'none';
 }
 function openUploadMenu(){
   showUploadMenuView('root');
@@ -2292,11 +2347,7 @@ $('dicomFromFileBtn').addEventListener('click', () => {
   closeUploadMenu();
   $('dicomFileInput').click();
 });
-$('dicomFromLinkBtn').addEventListener('click', () => {
-  showUploadMenuView('link');
-  $('driveLinkInput').focus();
-});
-$('linkBackBtn').addEventListener('click', () => showUploadMenuView('dicom'));
+$('dicomFromDriveBtn').addEventListener('click', loadDicomFromGoogleDrivePicker);
 $('dicomFileInput').addEventListener('change', async () => {
   const file = $('dicomFileInput').files[0];
   $('dicomFileInput').value = '';
@@ -2312,28 +2363,6 @@ $('dicomFileInput').addEventListener('change', async () => {
 });
 $('wlLevelInput').addEventListener('input', applyWindowLevel);
 $('wlWidthInput').addEventListener('input', applyWindowLevel);
-async function loadDicomFromDriveLink(){
-  const url = $('driveLinkInput').value;
-  if(!url.trim()) return;
-  $('driveLoadBtn').disabled = true;
-  $('driveLoadBtn').textContent = 'Loading…';
-  try{
-    const buf = await fetchDriveFileBuffer(url);
-    applyDicomBuffer(buf);
-    closeUploadMenu();
-  }catch(err){
-    currentDicomImage = null;
-    updateWindowLevelInputs();
-    alert('Could not load DICOM from Google Drive: ' + err.message);
-  }finally{
-    $('driveLoadBtn').disabled = false;
-    $('driveLoadBtn').textContent = 'Load';
-  }
-}
-$('driveLoadBtn').addEventListener('click', loadDicomFromDriveLink);
-$('driveLinkInput').addEventListener('keydown', (e) => {
-  if(e.key === 'Enter'){ e.preventDefault(); loadDicomFromDriveLink(); }
-});
 $('bgToggleBtn').addEventListener('click', () => {
   backgroundVisible = !backgroundVisible;
   updateBackgroundButtons();
@@ -2404,8 +2433,11 @@ window.__sandbox = {
   parseDicom, dicomToImageData, dicomExtractSamples, windowToImageData,
   setBackgroundFromImageLike, setBackgroundFromDicomImageData,
   updateWindowLevelInputs, applyWindowLevel,
-  applyDicomBuffer, extractDriveFileId, fetchDriveFileBuffer, loadDicomFromDriveLink,
+  applyDicomBuffer,
   openUploadMenu, closeUploadMenu, showUploadMenuView,
+  loadGoogleApis, ensureGoogleAuth, showDrivePicker, downloadDriveFileById, loadDicomFromGoogleDrivePicker,
+  get googleAccessToken(){ return googleAccessToken; },
+  set googleAccessToken(v){ googleAccessToken = v; },
   refreshUI
 };
 </script>
