@@ -125,6 +125,8 @@
     border:1px solid var(--border); border-radius:5px; cursor:pointer; font:inherit;}
   .mpr-toolbar button.sel{background:#0d5c85; border-color:var(--accent); color:#fff;}
   .mpr-toolbar button:not(.sel){background:#5c1f1f; border-color:#c0392b;}
+  .mpr-toolbar button:disabled, .mpr-toolbar input:disabled{opacity:.4; cursor:default; background:var(--panel2); border-color:var(--border);}
+  #mprDoseOpacity{width:90px;}
   .mpr-grid{flex:1; display:flex; min-height:0;}
   .mpr-pane{flex:1; min-width:0; display:flex; flex-direction:column;
     border-right:1px solid var(--border);}
@@ -374,6 +376,7 @@
               <button id="uploadImageBtn" class="menu-item">Image&hellip;</button>
               <button id="uploadDicomMenuBtn" class="menu-item">DICOM &#9656;</button>
               <button id="uploadSeriesMenuBtn" class="menu-item">DICOM Series (3D) &#9656;</button>
+              <button id="uploadDoseMenuBtn" class="menu-item">DICOM Dose &#9656;</button>
             </div>
             <div id="uploadMenuDicom" class="menu-view" style="display:none">
               <button id="dicomBackBtn" class="menu-item menu-back">&#9666; Back</button>
@@ -385,6 +388,11 @@
               <button id="seriesFromFolderBtn" class="menu-item">From local folder&hellip;</button>
               <button id="seriesFromDriveBtn" class="menu-item">From Drive folder&hellip;</button>
             </div>
+            <div id="uploadMenuDose" class="menu-view" style="display:none">
+              <button id="doseBackBtn" class="menu-item menu-back">&#9666; Back</button>
+              <button id="doseFromFileBtn" class="menu-item">From file&hellip;</button>
+              <button id="doseFromDriveBtn" class="menu-item">From Drive&hellip;</button>
+            </div>
           </div>
         </div>
         <button id="bgToggleBtn" disabled>Hide</button>
@@ -392,6 +400,7 @@
         <input type="file" id="imageFileInput" accept="image/*" style="display:none">
         <input type="file" id="dicomFileInput" accept=".dcm,application/dicom" style="display:none">
         <input type="file" id="dicomFolderInput" webkitdirectory multiple style="display:none">
+        <input type="file" id="doseFileInput" accept=".dcm,application/dicom" style="display:none">
       </div>
       <div class="topgroup">
         <span class="glabel">Window</span>
@@ -428,6 +437,9 @@
         <input type="number" id="mprLevelInput" step="1" style="width:64px" title="Window Level (center)">
         <label for="mprWidthInput">W</label>
         <input type="number" id="mprWidthInput" step="1" min="1" style="width:64px" title="Window Width">
+        <span class="glabel">Dose</span>
+        <button id="mprDoseToggleBtn" disabled title="Show/hide the RT Dose color-wash overlay">Dose</button>
+        <input type="range" id="mprDoseOpacity" min="0" max="1" step="0.05" value="0.5" disabled title="Dose overlay opacity">
       </div>
       <div class="mpr-grid">
         <div class="mpr-pane" id="mpr-pane-axial" data-plane="axial">
@@ -1481,6 +1493,7 @@ const DICOM_IMPLICIT_VR = {
   '0028,1050': 'DS', '0028,1051': 'DS', '0028,1052': 'DS', '0028,1053': 'DS',
   '0028,0030': 'DS', '0018,0050': 'DS',
   '0020,000E': 'UI', '0020,0032': 'DS', '0020,0013': 'IS', '0020,1041': 'DS',
+  '0008,0060': 'CS', '0028,0008': 'IS', '3004,000C': 'DS', '3004,000E': 'DS',
   '7FE0,0010': 'OW',
 };
 function dicomReadCString(view, offset, length){
@@ -1674,15 +1687,13 @@ function parseDicom(buffer){
     }
     if(['0028,0002', '0028,0010', '0028,0011', '0028,0100', '0028,0103'].includes(key)){
       tags[key] = view.getUint16(valueOffset, true);
-    }else if(['0028,0004', '0020,000E'].includes(key)){
+    }else if(['0028,0004', '0020,000E', '0008,0060'].includes(key)){
       tags[key] = dicomReadCString(view, valueOffset, length);
-    }else if(['0028,1050', '0028,1051', '0028,1052', '0028,1053', '0018,0050', '0020,1041'].includes(key)){
+    }else if(['0028,1050', '0028,1051', '0028,1052', '0028,1053', '0018,0050', '0020,1041', '3004,000E'].includes(key)){
       tags[key] = parseFloat(dicomReadCString(view, valueOffset, length).split('\\')[0]);
-    }else if(key === '0020,0013'){
+    }else if(['0020,0013', '0028,0008'].includes(key)){
       tags[key] = parseInt(dicomReadCString(view, valueOffset, length), 10);
-    }else if(key === '0028,0030'){
-      tags[key] = dicomReadCString(view, valueOffset, length).split('\\').map(Number);
-    }else if(key === '0020,0032'){
+    }else if(['0028,0030', '0020,0032', '3004,000C'].includes(key)){
       tags[key] = dicomReadCString(view, valueOffset, length).split('\\').map(Number);
     }
     valueOffset += length + (length % 2);
@@ -1703,6 +1714,11 @@ function parseDicom(buffer){
     windowCenter: tags['0028,1050'],
     windowWidth: tags['0028,1051'],
     pixelDataBytes,
+    modality: tags['0008,0060'],
+    // RT Dose-specific tags (present only in RTDOSE files)
+    numberOfFrames: tags['0028,0008'],
+    gridFrameOffsetVector: tags['3004,000C'],
+    doseGridScaling: tags['3004,000E'],
     // series-oriented tags, used only when building a 3D volume from a folder of slices
     seriesInstanceUID: tags['0020,000E'],
     imagePositionPatient: tags['0020,0032'],   // [x, y, z] mm, or undefined
@@ -1988,7 +2004,15 @@ function buildDicomVolume(dsList){
   const defaultCenter = windowCount > 0 ? sumCenter / windowCount : (minVal + maxVal) / 2;
   const defaultWidth = windowCount > 0 ? sumWidth / windowCount : ((maxVal - minVal) || 1);
 
-  return {cols, rows, numSlices, data, spacingX, spacingY, spacingZ, minVal, maxVal, defaultCenter, defaultWidth};
+  // Real-world (patient mm) origin of voxel (0,0,0), from the first sorted slice —
+  // needed to align an RT Dose grid (which has its own independent geometry)
+  // against this volume for the dose color-wash overlay.
+  const origin = withZ ? sorted[0].imagePositionPatient : [0, 0, 0];
+
+  return {
+    cols, rows, numSlices, data, spacingX, spacingY, spacingZ, minVal, maxVal, defaultCenter, defaultWidth,
+    originX: origin[0], originY: origin[1], originZ: origin[2],
+  };
 }
 // Axial: fixed z (slice), full (x,y) plane — a straight contiguous copy.
 function extractAxialSlice(vol, z){
@@ -2199,6 +2223,11 @@ function renderMprPane(plane){
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(off, pv.tx, pv.ty, dw, dh);
 
+  if(mprDoseVisible && doseVolume){
+    const doseCanvas = getDoseOverlayCanvas(plane, pv.index);
+    if(doseCanvas) ctx.drawImage(doseCanvas, pv.tx, pv.ty, dw, dh);
+  }
+
   if(plane !== 'axial') return;
   for(const s of structures){
     if(!s.visible) continue;
@@ -2358,6 +2387,12 @@ function installDicomVolume(vol){
   mprView.coronal.index = Math.floor(vol.rows / 2);
   mprView.sagittal.index = Math.floor(vol.cols / 2);
   updateMprWindowInputs();
+  // A previously-loaded dose grid was resampled against the OLD CT/MR
+  // volume's geometry; a new series invalidates that alignment entirely.
+  doseVolume = null;
+  mprDoseOverlayCache.axial = mprDoseOverlayCache.coronal = mprDoseOverlayCache.sagittal = null;
+  mprDoseVisible = false;
+  updateDoseUIEnabled();
   $('mpr3dToggleBtn').disabled = false;
   setMprMode(true);
 }
@@ -2441,6 +2476,172 @@ async function loadDicomSeriesFromGoogleDrivePicker(){
   }finally{
     $('seriesFromDriveBtn').disabled = false;
     $('seriesFromDriveBtn').textContent = prevLabel;
+  }
+}
+
+/* ============================ RT Dose color-wash overlay ============================
+   RT Dose files are structurally unlike CT/MR: one file holds every dose
+   plane as a single multi-frame PixelData blob (NumberOfFrames +
+   GridFrameOffsetVector, rather than one file per slice), with raw sample
+   values converted to Gy via DoseGridScaling. The dose grid also has its own
+   independent geometry (spacing + origin), generally different resolution
+   than the loaded CT/MR volume, so it's resampled (nearest-neighbor, assuming
+   uniform axial spacing like the rest of this viewer) against whichever
+   Axial/Coronal/Sagittal plane is currently displayed, cached per (plane,
+   slice index) since it only needs recomputing when the slice or opacity
+   changes, not on every pan/zoom. */
+let doseVolume = null;   // {cols, rows, numSlices, data (Gy), spacingX, spacingY, spacingZ, originX, originY, originZ, doseMax}
+let mprDoseVisible = false;
+let mprDoseOpacity = 0.5;
+const mprDoseOverlayCache = {axial: null, coronal: null, sagittal: null};   // {index, opacity, canvas}
+function buildDoseVolumeFromDataset(ds){
+  const {rows, cols, numberOfFrames, gridFrameOffsetVector, doseGridScaling,
+         bitsAllocated, signed, pixelDataBytes, imagePositionPatient, pixelSpacing} = ds;
+  if(ds.modality && ds.modality !== 'RTDOSE'){
+    throw new Error(`this file's Modality is "${ds.modality}", not RTDOSE`);
+  }
+  if(!numberOfFrames || numberOfFrames < 1) throw new Error('missing or invalid NumberOfFrames — is this really an RT Dose file?');
+  if(doseGridScaling == null) throw new Error('missing DoseGridScaling — is this really an RT Dose file?');
+  const perFrame = rows * cols;
+  const n = perFrame * numberOfFrames;
+  const data = new Float32Array(n);
+  let doseMax = 0;
+  if(bitsAllocated === 32){
+    const view = new DataView(pixelDataBytes.buffer, pixelDataBytes.byteOffset, n * 4);
+    for(let i = 0; i < n; i++){
+      const v = (signed ? view.getInt32(i * 4, true) : view.getUint32(i * 4, true)) * doseGridScaling;
+      data[i] = v; if(v > doseMax) doseMax = v;
+    }
+  }else if(bitsAllocated === 16){
+    const view = new DataView(pixelDataBytes.buffer, pixelDataBytes.byteOffset, n * 2);
+    for(let i = 0; i < n; i++){
+      const v = (signed ? view.getInt16(i * 2, true) : view.getUint16(i * 2, true)) * doseGridScaling;
+      data[i] = v; if(v > doseMax) doseMax = v;
+    }
+  }else{
+    throw new Error(`unsupported dose BitsAllocated (${bitsAllocated})`);
+  }
+  const ps = pixelSpacing;
+  const spacingY = (ps && ps[0]) || 1, spacingX = (ps && ps[1]) || 1;
+  const ipp = imagePositionPatient || [0, 0, 0];
+  const offs = gridFrameOffsetVector || [];
+  const originZ = ipp[2] + (offs[0] || 0);
+  let spacingZ = 1;
+  if(numberOfFrames > 1) spacingZ = Math.abs((ipp[2] + (offs[1] || 1)) - originZ) || 1;
+  return {
+    cols, rows, numSlices: numberOfFrames, data, spacingX, spacingY, spacingZ,
+    originX: ipp[0], originY: ipp[1], originZ, doseMax,
+  };
+}
+// Blue -> cyan -> yellow -> red, the conventional radiotherapy dose-wash gradient.
+function doseColormap(t){
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const stops = [[0, 0, 0, 255], [0.33, 0, 255, 255], [0.66, 255, 255, 0], [1, 255, 0, 0]];
+  for(let i = 0; i < stops.length - 1; i++){
+    const [t0, r0, g0, b0] = stops[i], [t1, r1, g1, b1] = stops[i + 1];
+    if(t <= t1){
+      const f = (t - t0) / ((t1 - t0) || 1);
+      return [Math.round(r0 + (r1 - r0) * f), Math.round(g0 + (g1 - g0) * f), Math.round(b0 + (b1 - b0) * f)];
+    }
+  }
+  return [255, 0, 0];
+}
+// Nearest-neighbor dose lookup at a patient-space (mm) coordinate; 0 outside the dose grid.
+function sampleDoseAtPatientXYZ(x, y, z){
+  if(!doseVolume) return 0;
+  const dc = Math.round((x - doseVolume.originX) / doseVolume.spacingX);
+  const dr = Math.round((y - doseVolume.originY) / doseVolume.spacingY);
+  const df = Math.round((z - doseVolume.originZ) / doseVolume.spacingZ);
+  if(dc < 0 || dc >= doseVolume.cols || dr < 0 || dr >= doseVolume.rows || df < 0 || df >= doseVolume.numSlices) return 0;
+  return doseVolume.data[df * doseVolume.cols * doseVolume.rows + dr * doseVolume.cols + dc];
+}
+// Builds (or returns the cached) colorwash overlay canvas for one MPR plane/slice,
+// resampling the dose grid against every displayed CT/MR voxel's real-world position.
+function getDoseOverlayCanvas(plane, index){
+  if(!doseVolume || !dicomVolume) return null;
+  const cached = mprDoseOverlayCache[plane];
+  if(cached && cached.index === index && cached.opacity === mprDoseOpacity) return cached.canvas;
+
+  const vol = dicomVolume;
+  let w, h, toXYZ;
+  if(plane === 'axial'){
+    w = vol.cols; h = vol.rows;
+    toXYZ = (cx, cy) => [vol.originX + cx * vol.spacingX, vol.originY + cy * vol.spacingY, vol.originZ + index * vol.spacingZ];
+  }else if(plane === 'coronal'){
+    w = vol.cols; h = vol.numSlices;
+    toXYZ = (cx, cz) => [vol.originX + cx * vol.spacingX, vol.originY + index * vol.spacingY, vol.originZ + cz * vol.spacingZ];
+  }else{
+    w = vol.rows; h = vol.numSlices;
+    toXYZ = (cy, cz) => [vol.originX + index * vol.spacingX, vol.originY + cy * vol.spacingY, vol.originZ + cz * vol.spacingZ];
+  }
+  const out = new Uint8ClampedArray(w * h * 4);
+  const doseMax = doseVolume.doseMax || 1;
+  for(let yy = 0; yy < h; yy++){
+    for(let xx = 0; xx < w; xx++){
+      const [X, Y, Z] = toXYZ(xx, yy);
+      const dose = sampleDoseAtPatientXYZ(X, Y, Z);
+      const o = (yy * w + xx) * 4;
+      if(dose <= 0) continue;   // leave fully transparent (alpha already 0)
+      const frac = Math.min(1, dose / doseMax);
+      const [r, g, b] = doseColormap(frac);
+      out[o] = r; out[o + 1] = g; out[o + 2] = b;
+      out[o + 3] = Math.round(255 * mprDoseOpacity * Math.min(1, frac + 0.15));
+    }
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  canvas.getContext('2d').putImageData(new ImageData(out, w, h), 0, 0);
+  mprDoseOverlayCache[plane] = {index, opacity: mprDoseOpacity, canvas};
+  return canvas;
+}
+function setMprDoseVisible(on){
+  mprDoseVisible = on;
+  $('mprDoseToggleBtn').classList.toggle('sel', on);
+  $('mprDoseOpacity').disabled = !on;
+  renderAllMprPanes();
+}
+function setMprDoseOpacity(v){
+  mprDoseOpacity = v;
+  renderAllMprPanes();
+}
+function updateDoseUIEnabled(){
+  const has = !!doseVolume;
+  $('mprDoseToggleBtn').disabled = !has;
+  $('mprDoseOpacity').disabled = !has || !mprDoseVisible;
+}
+function installDoseVolume(vol){
+  doseVolume = vol;
+  mprDoseOverlayCache.axial = mprDoseOverlayCache.coronal = mprDoseOverlayCache.sagittal = null;
+  updateDoseUIEnabled();
+  setMprDoseVisible(true);
+}
+async function loadDoseFromBuffer(buf){
+  if(!dicomVolume) throw new Error('load a CT/MR series first (Upload → DICOM Series), then load the dose file to overlay it');
+  const ds = parseDicom(buf);
+  installDoseVolume(buildDoseVolumeFromDataset(ds));
+}
+async function loadDoseFromGoogleDrivePicker(){
+  $('doseFromDriveBtn').disabled = true;
+  const prevLabel = $('doseFromDriveBtn').textContent;
+  $('doseFromDriveBtn').textContent = 'Connecting…';
+  try{
+    await loadGoogleApis();
+    await ensureGoogleAuth();
+    let fileId;
+    try{
+      fileId = await showDrivePicker();
+    }catch(err){
+      if(err.message === 'cancelled') return;
+      throw err;
+    }
+    const buf = await downloadDriveFileById(fileId);
+    await loadDoseFromBuffer(buf);
+    closeUploadMenu();
+  }catch(err){
+    alert('Could not load RT Dose from Google Drive: ' + err.message);
+  }finally{
+    $('doseFromDriveBtn').disabled = false;
+    $('doseFromDriveBtn').textContent = prevLabel;
   }
 }
 
@@ -3068,6 +3269,7 @@ function showUploadMenuView(view){
   $('uploadMenuRoot').style.display = view === 'root' ? 'flex' : 'none';
   $('uploadMenuDicom').style.display = view === 'dicom' ? 'flex' : 'none';
   $('uploadMenuSeries').style.display = view === 'series' ? 'flex' : 'none';
+  $('uploadMenuDose').style.display = view === 'dose' ? 'flex' : 'none';
 }
 function openUploadMenu(){
   showUploadMenuView('root');
@@ -3129,6 +3331,27 @@ $('dicomFolderInput').addEventListener('change', async () => {
   await loadDicomSeriesFromFiles(files);
 });
 $('seriesFromDriveBtn').addEventListener('click', loadDicomSeriesFromGoogleDrivePicker);
+$('uploadDoseMenuBtn').addEventListener('click', () => showUploadMenuView('dose'));
+$('doseBackBtn').addEventListener('click', () => showUploadMenuView('root'));
+$('doseFromFileBtn').addEventListener('click', () => {
+  closeUploadMenu();
+  $('doseFileInput').click();
+});
+$('doseFileInput').addEventListener('change', async () => {
+  const file = $('doseFileInput').files[0];
+  $('doseFileInput').value = '';
+  if(!file) return;
+  try{
+    const buf = await file.arrayBuffer();
+    await loadDoseFromBuffer(buf);
+    closeUploadMenu();
+  }catch(err){
+    alert('Could not load RT Dose file: ' + err.message);
+  }
+});
+$('doseFromDriveBtn').addEventListener('click', loadDoseFromGoogleDrivePicker);
+$('mprDoseToggleBtn').addEventListener('click', () => setMprDoseVisible(!mprDoseVisible));
+$('mprDoseOpacity').addEventListener('input', () => setMprDoseOpacity(+$('mprDoseOpacity').value));
 $('mpr3dToggleBtn').addEventListener('click', () => setMprMode(!mprMode));
 $('mprNavToggleBtn').addEventListener('click', () => setMpr3dNavMode(!mpr3dNavMode));
 $('mprLevelInput').addEventListener('input', applyMprWindowLevel);
@@ -3242,6 +3465,11 @@ window.__sandbox = {
   setMpr3dNavMode, toggleMprMaximize, isMprAxialDrawing,
   getVolMask, mprPolygonRegion, mprApplyRegion, mprStampDisc, mprStampSegment,
   mprBrushDiameterVoxels, axialScreenToVoxel, mprMaskOverlayCanvas,
+  get doseVolume(){ return doseVolume; },
+  get mprDoseVisible(){ return mprDoseVisible; },
+  get mprDoseOpacity(){ return mprDoseOpacity; },
+  buildDoseVolumeFromDataset, doseColormap, sampleDoseAtPatientXYZ, getDoseOverlayCanvas,
+  setMprDoseVisible, setMprDoseOpacity, installDoseVolume, loadDoseFromBuffer, loadDoseFromGoogleDrivePicker,
   refreshUI
 };
 </script>
