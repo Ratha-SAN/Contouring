@@ -1473,6 +1473,7 @@ const DICOM_TRANSFER_SYNTAXES = {
   '1.2.840.10008.1.2': 'implicit-le',
   '1.2.840.10008.1.2.1': 'explicit-le',
   '1.2.840.10008.1.2.2': 'explicit-be',
+  '1.2.840.10008.1.2.5': 'rle',
 };
 const DICOM_IMPLICIT_VR = {
   '0028,0002': 'US', '0028,0004': 'CS', '0028,0010': 'US', '0028,0011': 'US',
@@ -1493,6 +1494,116 @@ function dicomReadCString(view, offset, length){
 }
 function dicomKey(group, element){
   return group.toString(16).padStart(4, '0').toUpperCase() + ',' + element.toString(16).padStart(4, '0').toUpperCase();
+}
+/* --- undefined-length sequence (SQ) skipping ---
+   A defined-length SQ can just be skipped like any other element (its byte
+   length is already known). An undefined-length one (length===0xFFFFFFFF,
+   common even in ordinary CT/MR files for routine optional sequences) is
+   instead a stream of Items (FFFE,E000) terminated by a Sequence Delimitation
+   Item (FFFE,E0DD); an Item can itself have undefined length, in which case
+   its content is a nested element stream terminated by an Item Delimitation
+   Item (FFFE,E00D) — and any element in there can again be an undefined-
+   length SQ, hence the mutual recursion below. This is also the foundation
+   RTSTRUCT parsing (below) uses to actually read sequence contents, not just
+   skip them. */
+function dicomSkipSequence(view, buffer, p, implicit){
+  while(p + 8 <= buffer.byteLength){
+    const group = view.getUint16(p, true), element = view.getUint16(p + 2, true);
+    const itemLen = view.getUint32(p + 4, true);
+    p += 8;
+    if(group === 0xFFFE && element === 0xE0DD) return p;
+    if(group === 0xFFFE && element === 0xE000){
+      p = (itemLen === 0xFFFFFFFF) ? dicomSkipItemElements(view, buffer, p, implicit) : p + itemLen + (itemLen % 2);
+    }else{
+      return p;   // malformed/unexpected — stop scanning rather than loop forever
+    }
+  }
+  return p;
+}
+function dicomSkipItemElements(view, buffer, p, implicit){
+  while(p + 8 <= buffer.byteLength){
+    const group = view.getUint16(p, true), element = view.getUint16(p + 2, true);
+    if(group === 0xFFFE && element === 0xE00D) return p + 8;
+    let vr, length, valueOffset;
+    if(implicit){
+      vr = DICOM_IMPLICIT_VR[dicomKey(group, element)] || 'UN';
+      length = view.getUint32(p + 4, true);
+      valueOffset = p + 8;
+    }else{
+      vr = String.fromCharCode(view.getUint8(p + 4), view.getUint8(p + 5));
+      if(['OB', 'OW', 'OF', 'SQ', 'UT', 'UN'].includes(vr)){
+        length = view.getUint32(p + 8, true); valueOffset = p + 12;
+      }else{
+        length = view.getUint16(p + 6, true); valueOffset = p + 8;
+      }
+    }
+    p = (length === 0xFFFFFFFF) ? dicomSkipSequence(view, buffer, valueOffset, implicit) : valueOffset + length + (length % 2);
+  }
+  return p;
+}
+/* --- DICOM Native RLE Lossless (transfer syntax 1.2.840.10008.1.2.5, PS3.5
+   Annex G) — a simple byte-oriented scheme, unlike JPEG/JPEG2000 which need a
+   real image codec (out of scope here). PixelData is "encapsulated": stored
+   as undefined-length OB with an Item stream (Basic Offset Table item, then
+   one fragment item per frame — this parser assumes one fragment per frame,
+   true for any single ordinary-sized medical image slice). Each fragment's
+   bytes are a 64-byte segment-offset header followed by one PackBits-like
+   RLE-compressed segment per byte-plane (MSB segment first for multi-byte
+   samples), which dicomDecodeRLE reassembles into the same flat
+   little-endian per-sample byte layout dicomExtractSamples already expects. */
+function dicomRleDecodeSegment(view, start, end, expectedLen){
+  const out = new Uint8Array(expectedLen);
+  let ip = start, op = 0;
+  while(op < expectedLen && ip < end){
+    const control = view.getInt8(ip); ip++;
+    if(control >= 0){
+      const count = control + 1;
+      for(let k = 0; k < count && op < expectedLen && ip < end; k++){ out[op++] = view.getUint8(ip); ip++; }
+    }else if(control !== -128){
+      const count = 1 - control;
+      if(ip >= end) break;
+      const val = view.getUint8(ip); ip++;
+      for(let k = 0; k < count && op < expectedLen; k++) out[op++] = val;
+    }
+    // control === -128: no-op filler byte, already consumed
+  }
+  return out;
+}
+function dicomDecodeRLE(view, byteOffset, byteLength, rows, cols, samplesPerPixel, bitsAllocated){
+  const bytesPerSample = bitsAllocated / 8;
+  const numSegments = view.getUint32(byteOffset, true);
+  const segStarts = [];
+  for(let i = 0; i < numSegments; i++) segStarts.push(byteOffset + view.getUint32(byteOffset + 4 + i * 4, true));
+  const dataEnd = byteOffset + byteLength;
+  const perPixel = rows * cols;
+  const segments = [];
+  for(let i = 0; i < numSegments; i++){
+    const segEnd = (i + 1 < numSegments) ? segStarts[i + 1] : dataEnd;
+    segments.push(dicomRleDecodeSegment(view, segStarts[i], segEnd, perPixel));
+  }
+  const out = new Uint8Array(perPixel * samplesPerPixel * bytesPerSample);
+  for(let c = 0; c < samplesPerPixel; c++){
+    for(let b = 0; b < bytesPerSample; b++){
+      const seg = segments[c * bytesPerSample + b];
+      if(!seg) continue;
+      const outByteInSample = bytesPerSample - 1 - b;   // MSB segment first -> highest byte address (little-endian)
+      for(let p = 0; p < perPixel; p++) out[(p * samplesPerPixel + c) * bytesPerSample + outByteInSample] = seg[p];
+    }
+  }
+  return out;
+}
+// Reads the encapsulated PixelData item stream starting at `p` (which points
+// just past the undefined-length PixelData element's header, at the first
+// Item tag) and RLE-decodes the first frame's fragment. Returns the decoded
+// flat byte buffer.
+function dicomDecodeEncapsulatedRLE(view, buffer, p, rows, cols, samplesPerPixel, bitsAllocated){
+  // First item: Basic Offset Table (its length tells us how far to skip; content unused here).
+  const botLen = view.getUint32(p + 4, true);
+  p += 8 + botLen + (botLen % 2);
+  // Second item: the (single) fragment holding this frame's RLE-compressed data.
+  const fragLen = view.getUint32(p + 4, true);
+  const fragStart = p + 8;
+  return dicomDecodeRLE(view, fragStart, fragLen, rows, cols, samplesPerPixel, bitsAllocated);
 }
 function parseDicom(buffer){
   const view = new DataView(buffer);
@@ -1543,14 +1654,25 @@ function parseDicom(buffer){
         length = view.getUint16(p + 6, true); valueOffset = p + 8;
       }
     }
-    if(length === 0xFFFFFFFF){
-      throw new Error('undefined-length element encountered (likely compressed/encapsulated pixel data), not supported');
-    }
     const key = dicomKey(group, element);
     if(key === '7FE0,0010'){
-      pixelDataBytes = new Uint8Array(buffer, valueOffset, length);
+      if(length === 0xFFFFFFFF){
+        if(syntax !== 'rle') throw new Error('compressed/encapsulated pixel data is not supported for this transfer syntax');
+        pixelDataBytes = dicomDecodeEncapsulatedRLE(view, buffer, valueOffset,
+          tags['0028,0010'], tags['0028,0011'], tags['0028,0002'] || 1, tags['0028,0100'] || 16);
+      }else{
+        pixelDataBytes = new Uint8Array(buffer, valueOffset, length);
+      }
       break;
-    }else if(['0028,0002', '0028,0010', '0028,0011', '0028,0100', '0028,0103'].includes(key)){
+    }
+    if(length === 0xFFFFFFFF){
+      // undefined-length sequence: skip its content and move on (see
+      // dicomSkipSequence's comment) rather than treating the whole file as
+      // unparseable — this is routine in ordinary CT/MR files, not just RTSTRUCT.
+      p = dicomSkipSequence(view, buffer, valueOffset, implicit);
+      continue;
+    }
+    if(['0028,0002', '0028,0010', '0028,0011', '0028,0100', '0028,0103'].includes(key)){
       tags[key] = view.getUint16(valueOffset, true);
     }else if(['0028,0004', '0020,000E'].includes(key)){
       tags[key] = dicomReadCString(view, valueOffset, length);
@@ -3096,6 +3218,7 @@ window.__sandbox = {
   get backgroundVisible(){ return backgroundVisible; },
   get currentDicomImage(){ return currentDicomImage; },
   parseDicom, dicomToImageData, dicomExtractSamples, windowToImageData,
+  dicomDecodeRLE, dicomRleDecodeSegment, dicomDecodeEncapsulatedRLE, dicomSkipSequence,
   setBackgroundFromImageLike, setBackgroundFromDicomImageData,
   updateWindowLevelInputs, applyWindowLevel,
   applyDicomBuffer,
