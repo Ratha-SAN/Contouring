@@ -439,6 +439,7 @@
     <div id="stage3d" style="display:none">
       <div class="mpr-toolbar">
         <button id="mprNavToggleBtn" class="sel" title="When on, dragging pans a view. When off, the active drawing tool (Pencil/Brush/Eraser) draws on the Axial slice instead.">View Control: On</button>
+        <button id="mprCrosshairToggleBtn" class="sel" title="Show/hide the linked crosshair marking where the other two planes currently are">Crosshair</button>
         <span class="glabel">Window</span>
         <label for="mprLevelInput">L</label>
         <input type="number" id="mprLevelInput" step="1" style="width:64px" title="Window Level (center)">
@@ -483,7 +484,7 @@
           <input type="range" class="mpr-slider" id="mpr-sagittal-slider" min="0" max="0" value="0">
         </div>
       </div>
-      <div class="mpr-hint">Scroll: change slice &middot; Ctrl/Cmd+scroll: zoom &middot; Drag: pan (View Control on) or draw on Axial (View Control off + Pencil/Brush/Eraser)</div>
+      <div class="mpr-hint">Scroll or &uarr;/&darr; (hover a pane first): change slice &middot; Ctrl/Cmd+scroll: zoom &middot; Drag: pan (View Control on) or draw on Axial (View Control off + Pencil/Brush/Eraser)</div>
     </div>
   </div>
 
@@ -2129,15 +2130,19 @@ async function loadDicomFromGoogleDrivePicker(){
    Builds a volume from a folder of same-series DICOM slices and renders three
    independent orthogonal panes (Axial/Coronal/Sagittal), each with its own
    pan/zoom/scroll, plus per-slice Pencil/Brush/Eraser drawing on the Axial
-   pane only (Coronal/Sagittal stay read-only reference views). Structures
-   store this as `volMasks`, a per-axial-slice-index array of masks sized to
-   the volume's resolution — separate from `mask`, the single 2D-canvas mask,
-   which this mode never touches. */
+   pane only (Coronal/Sagittal stay read-only reference views for panning,
+   but DO show the cross-section of whatever's been drawn — see
+   extractStructurePlaneMask). Structures store this as `volMasks`, a
+   per-axial-slice-index array of masks sized to the volume's resolution —
+   separate from `mask`, the single 2D-canvas mask, which this mode never
+   touches. */
 let dicomVolume = null;   // {cols, rows, numSlices, data, spacingX, spacingY, spacingZ, minVal, maxVal, defaultCenter, defaultWidth}
 let mprMode = false;
 let mprMaximized = null;   // null, or the plane currently filling the whole grid
 let mpr3dNavMode = true;   // true: drag pans; false: the active drawing tool draws on Axial
 let mprDrag = null;        // in-progress Axial draw stroke: {kind:'pencil'|'stamp', z, ...}
+let mprCrosshairVisible = true;   // linked reticle showing where the other two planes currently are
+let mprHoveredPane = 'axial';     // which pane Up/Down arrow keys act on
 let mprWindowCenter = 0, mprWindowWidth = 1;
 const MPR_PLANES = ['axial', 'coronal', 'sagittal'];
 const MPR_DRAWABLE_TOOLS = ['pencil', 'brush', 'eraser'];
@@ -2261,6 +2266,42 @@ function mprPlaneSpacing(plane){
   if(plane === 'axial') return [dicomVolume.spacingX, dicomVolume.spacingY];
   if(plane === 'coronal') return [dicomVolume.spacingX, dicomVolume.spacingZ];
   return [dicomVolume.spacingY, dicomVolume.spacingZ];
+}
+// Cross-sections a structure's per-axial-slice volMasks the same way the CT/MR
+// volume itself is resliced (extractCoronalSlice/extractSagittalSlice above),
+// so a contour drawn only on the Axial pane still shows its outline on
+// Coronal/Sagittal. Returns null (nothing to draw) if the structure has no
+// voxels on this particular plane/index.
+function extractStructurePlaneMask(s, plane, index, vol){
+  if(!s.volMasks) return null;
+  const {cols, rows, numSlices} = vol;
+  if(plane === 'axial') return s.volMasks[index] || null;
+  if(plane === 'coronal'){
+    const out = new Uint8Array(cols * numSlices);
+    let any = false;
+    for(let z = 0; z < numSlices; z++){
+      const m = s.volMasks[z];
+      if(!m) continue;
+      const base = index * cols;
+      for(let x = 0; x < cols; x++){ if(m[base + x]){ out[z * cols + x] = 1; any = true; } }
+    }
+    return any ? out : null;
+  }
+  const out = new Uint8Array(rows * numSlices);   // sagittal
+  let any = false;
+  for(let z = 0; z < numSlices; z++){
+    const m = s.volMasks[z];
+    if(!m) continue;
+    for(let y = 0; y < rows; y++){ if(m[y * cols + index]){ out[z * rows + y] = 1; any = true; } }
+  }
+  return any ? out : null;
+}
+// Where the OTHER two planes currently are, expressed as [voxelX, voxelY] in
+// THIS plane's own coordinate system — used to draw the linked crosshair.
+function mprCrosshairPos(plane){
+  if(plane === 'axial') return [mprView.sagittal.index, mprView.coronal.index];
+  if(plane === 'coronal') return [mprView.sagittal.index, mprView.axial.index];
+  return [mprView.coronal.index, mprView.axial.index];   // sagittal
 }
 function windowSliceToImageData(slice, center, width){
   const {width: w, height: h, values} = slice;
@@ -2432,15 +2473,18 @@ function renderMprPane(plane){
     if(doseCanvas) ctx.drawImage(doseCanvas, pv.tx, pv.ty, dw, dh);
   }
 
-  if(plane !== 'axial') return;
+  // Structure contours: cross-sectioned onto whichever plane this is, so
+  // drawing on Axial is visible as an outline on Coronal/Sagittal too.
   for(const s of structures){
     if(!s.visible) continue;
-    const mask = s.volMasks && s.volMasks[pv.index];
+    const mask = extractStructurePlaneMask(s, plane, pv.index, dicomVolume);
     if(!mask) continue;
-    const overlay = mprMaskOverlayCanvas(mask, dicomVolume.cols, dicomVolume.rows, s.color);
+    const overlay = mprMaskOverlayCanvas(mask, slice.width, slice.height, s.color);
     ctx.drawImage(overlay, pv.tx, pv.ty, dw, dh);
   }
-  if(mprDrag && mprDrag.kind === 'pencil' && mprDrag.pts.length > 1){
+  // Live pencil-path preview only applies to the Axial pane, where the point
+  // coordinates in mprDrag.pts actually live.
+  if(plane === 'axial' && mprDrag && mprDrag.kind === 'pencil' && mprDrag.pts.length > 1){
     const toScr = p => [p[0] * sw * pv.scale + pv.tx, p[1] * sh * pv.scale + pv.ty];
     ctx.beginPath();
     const p0 = toScr(mprDrag.pts[0]);
@@ -2454,6 +2498,19 @@ function renderMprPane(plane){
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
+  if(mprCrosshairVisible){
+    const [vx, vy] = mprCrosshairPos(plane);
+    const scx = pv.tx + vx * sw * pv.scale, scy = pv.ty + vy * sh * pv.scale;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,0,0.7)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(scx, 0); ctx.lineTo(scx, ch);
+    ctx.moveTo(0, scy); ctx.lineTo(cw, scy);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 function renderAllMprPanes(){ MPR_PLANES.forEach(renderMprPane); }
 // Toggles pan/zoom controls vs. Axial drawing. Auto-disabled by setTool()
@@ -2466,6 +2523,11 @@ function setMpr3dNavMode(on){
 }
 function isMprAxialDrawing(){
   return !mpr3dNavMode && !!dicomVolume && MPR_DRAWABLE_TOOLS.includes(tool) && activeIdx >= 0;
+}
+function setMprCrosshairVisible(on){
+  mprCrosshairVisible = on;
+  $('mprCrosshairToggleBtn').classList.toggle('sel', on);
+  renderAllMprPanes();
 }
 // Maximizes one pane to fill the whole grid (hiding the other two), or
 // restores the normal 3-pane layout if the same plane is toggled again.
@@ -2505,14 +2567,16 @@ function mprPaneInteraction(plane){
       pv.tx = mx - (mx - pv.tx) * factor;
       pv.ty = my - (my - pv.ty) * factor;
       pv.scale *= factor;
+      renderMprPane(plane);
     }else{
       const maxIdx = mprPlaneCount(plane) - 1;
       const dir = e.deltaY > 0 ? 1 : -1;
       pv.index = Math.max(0, Math.min(maxIdx, pv.index + dir));
       updateMprSliceUI(plane);
+      renderAllMprPanes();   // other panes' crosshair position depends on this plane's index
     }
-    renderMprPane(plane);
   }, {passive: false});
+  canvas.addEventListener('pointerenter', () => { mprHoveredPane = plane; });
   let dragging = false, lastX = 0, lastY = 0;
   canvas.addEventListener('pointerdown', (e) => {
     if(!dicomVolume) return;
@@ -2566,7 +2630,8 @@ function mprPaneInteraction(plane){
         mprApplyRegion(mask, region, getRadio('pencil-mode') === 'add', dicomVolume.cols, dicomVolume.rows);
       }
       mprDrag = null;
-      renderMprPane('axial');
+      // the finished stroke may now show up as a cross-section on Coronal/Sagittal too
+      renderAllMprPanes();
     }
     dragging = false;
   };
@@ -2575,7 +2640,7 @@ function mprPaneInteraction(plane){
   $(`mpr-${plane}-slider`).addEventListener('input', () => {
     mprView[plane].index = +$(`mpr-${plane}-slider`).value;
     updateMprSliceUI(plane);
-    renderMprPane(plane);
+    renderAllMprPanes();
   });
   $(`mpr-${plane}-fit`).addEventListener('click', () => { fitMprPane(plane); renderMprPane(plane); });
   $(`mpr-${plane}-zoomin`).addEventListener('click', () => { mprView[plane].scale *= 1.25; renderMprPane(plane); });
@@ -3223,6 +3288,9 @@ function refreshUI(){
   updateExtConv();
   updateStatus();
   scheduleDraw();
+  // structure add/delete/visibility/undo/redo/RTSTRUCT-import can all change
+  // what the 3D panes should show (volMasks, s.visible), so keep them in sync
+  if(mprMode && dicomVolume) renderAllMprPanes();
 }
 
 /* ============================ tool switching ============================ */
@@ -3606,10 +3674,26 @@ $('mprDoseToggleBtn').addEventListener('click', () => setMprDoseVisible(!mprDose
 $('mprDoseOpacity').addEventListener('input', () => setMprDoseOpacity(+$('mprDoseOpacity').value));
 $('mpr3dToggleBtn').addEventListener('click', () => setMprMode(!mprMode));
 $('mprNavToggleBtn').addEventListener('click', () => setMpr3dNavMode(!mpr3dNavMode));
+$('mprCrosshairToggleBtn').addEventListener('click', () => setMprCrosshairVisible(!mprCrosshairVisible));
 $('mprLevelInput').addEventListener('input', applyMprWindowLevel);
 $('mprWidthInput').addEventListener('input', applyMprWindowLevel);
 MPR_PLANES.forEach(mprPaneInteraction);
 new ResizeObserver(() => { if(mprMode) renderAllMprPanes(); }).observe($('stage3d'));
+// Up/Down arrow keys scroll whichever pane the mouse is currently over
+// (mprHoveredPane, tracked by each pane's pointerenter listener above).
+document.addEventListener('keydown', (e) => {
+  if(!mprMode || !dicomVolume) return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if(tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if(e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  e.preventDefault();
+  const plane = mprHoveredPane;
+  const maxIdx = mprPlaneCount(plane) - 1;
+  const dir = e.key === 'ArrowUp' ? 1 : -1;
+  mprView[plane].index = Math.max(0, Math.min(maxIdx, mprView[plane].index + dir));
+  updateMprSliceUI(plane);
+  renderAllMprPanes();
+});
 $('dicomFileInput').addEventListener('change', async () => {
   const file = $('dicomFileInput').files[0];
   $('dicomFileInput').value = '';
@@ -3724,6 +3808,9 @@ window.__sandbox = {
   setMprDoseVisible, setMprDoseOpacity, installDoseVolume, loadDoseFromBuffer, loadDoseFromGoogleDrivePicker,
   parseRTStruct, importRTStructAsStructures, loadRTStructFromBuffer, loadRTStructFromGoogleDrivePicker,
   dicomReadSequenceItems, dicomReadDatasetBounded,
+  get mprCrosshairVisible(){ return mprCrosshairVisible; },
+  get mprHoveredPane(){ return mprHoveredPane; },
+  setMprCrosshairVisible, mprCrosshairPos, extractStructurePlaneMask,
   refreshUI
 };
 </script>
