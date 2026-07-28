@@ -116,7 +116,11 @@
     color:var(--dim); font-size:12px;}
 
   /* 3D (Axial/Coronal/Sagittal) MPR viewer, swapped in for #stage */
-  #stage3d{flex:1; display:none; flex-direction:column; min-width:0; min-height:0; background:var(--bg);}
+  #stage3d{flex:1; display:none; flex-direction:column; min-width:0; min-height:0;
+    background:var(--bg); position:relative;}
+  #mpr-coords{position:absolute; left:8px; bottom:26px; padding:3px 9px;
+    background:rgba(0,0,0,.65); color:var(--text); font-size:12px; font-variant-numeric:tabular-nums;
+    border-radius:4px; pointer-events:none; z-index:6; white-space:nowrap;}
   .mpr-toolbar{display:flex; align-items:center; gap:6px; padding:6px 12px;
     border-bottom:1px solid var(--border); background:var(--panel);}
   .mpr-toolbar input[type=number]{background:var(--panel2); color:var(--text);
@@ -129,8 +133,10 @@
   #mprDoseOpacity{width:90px;}
   .mpr-grid{flex:1; display:flex; min-height:0;}
   .mpr-pane{flex:1; min-width:0; display:flex; flex-direction:column;
-    border-right:1px solid var(--border);}
+    border-right:1px solid var(--border); box-shadow:inset 0 0 0 0 var(--accent); transition:box-shadow .1s;}
   .mpr-pane:last-child{border-right:none;}
+  .mpr-pane.mpr-selected{box-shadow:inset 0 0 0 2px var(--accent);}
+  .mpr-pane.mpr-selected .mpr-hdr{background:#123449;}
   .mpr-hdr{display:flex; align-items:center; gap:6px; padding:5px 8px;
     background:var(--panel); border-bottom:1px solid var(--border); font-size:12px;}
   .mpr-hdr .mpr-idx{color:var(--dim); margin-right:auto;}
@@ -484,7 +490,8 @@
           <input type="range" class="mpr-slider" id="mpr-sagittal-slider" min="0" max="0" value="0">
         </div>
       </div>
-      <div class="mpr-hint">Scroll or &uarr;/&darr; (hover a pane first): change slice &middot; Ctrl/Cmd+scroll: zoom &middot; Drag: pan (View Control on) or draw on Axial (View Control off + Pencil/Brush/Eraser)</div>
+      <div id="mpr-coords">X: –   Y: –   Z: –</div>
+      <div class="mpr-hint">Scroll or &uarr;/&darr; (hover a pane first): change slice &middot; Ctrl/Cmd+scroll: zoom &middot; Drag: pan (View Control on) or draw on Axial (View Control off + Pencil/Brush/Eraser) &middot; Drag the crosshair's yellow handle to jump the other views</div>
     </div>
   </div>
 
@@ -2142,7 +2149,9 @@ let mprMaximized = null;   // null, or the plane currently filling the whole gri
 let mpr3dNavMode = true;   // true: drag pans; false: the active drawing tool draws on Axial
 let mprDrag = null;        // in-progress Axial draw stroke: {kind:'pencil'|'stamp', z, ...}
 let mprCrosshairVisible = true;   // linked reticle showing where the other two planes currently are
-let mprHoveredPane = 'axial';     // which pane Up/Down arrow keys act on
+let mprCrosshairDragging = null;  // plane whose crosshair handle is currently being dragged, or null
+let mprHoveredPane = 'axial';     // which pane Up/Down arrow keys act on, and which is highlighted
+const MPR_CROSSHAIR_HANDLE_RADIUS = 8;   // CSS px hit-test radius for grabbing the crosshair handle
 let mprWindowCenter = 0, mprWindowWidth = 1;
 const MPR_PLANES = ['axial', 'coronal', 'sagittal'];
 const MPR_DRAWABLE_TOOLS = ['pencil', 'brush', 'eraser'];
@@ -2510,6 +2519,18 @@ function renderMprPane(plane){
     ctx.moveTo(0, scy); ctx.lineTo(cw, scy);
     ctx.stroke();
     ctx.restore();
+    // draggable handle at the crosshair's tip, so the other two planes' slices
+    // can be moved directly by dragging this point instead of only scrolling
+    ctx.save();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(scx, scy, 5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,225,77,0.3)';
+    ctx.fill();
+    ctx.strokeStyle = '#ffe14d';
+    ctx.lineWidth = mprCrosshairDragging === plane ? 2.5 : 1.5;
+    ctx.stroke();
+    ctx.restore();
   }
 }
 function renderAllMprPanes(){ MPR_PLANES.forEach(renderMprPane); }
@@ -2528,6 +2549,48 @@ function setMprCrosshairVisible(on){
   mprCrosshairVisible = on;
   $('mprCrosshairToggleBtn').classList.toggle('sel', on);
   renderAllMprPanes();
+}
+// Inverse of mprCrosshairPos: given a new handle position (in THIS plane's own
+// voxel coordinates) dragged from the pointer, updates the OTHER two planes'
+// slice indices so the crosshair moves to that point.
+function setMprCrosshairFromPlane(plane, vx, vy){
+  const {cols, rows, numSlices} = dicomVolume;
+  const clamp = (v, max) => Math.max(0, Math.min(max, Math.round(v)));
+  if(plane === 'axial'){
+    mprView.sagittal.index = clamp(vx, cols - 1);
+    mprView.coronal.index = clamp(vy, rows - 1);
+  }else if(plane === 'coronal'){
+    mprView.sagittal.index = clamp(vx, cols - 1);
+    mprView.axial.index = clamp(vy, numSlices - 1);
+  }else{
+    mprView.coronal.index = clamp(vx, rows - 1);
+    mprView.axial.index = clamp(vy, numSlices - 1);
+  }
+  MPR_PLANES.forEach(updateMprSliceUI);
+}
+// Converts a pointer position on one plane into full 3D volume (X,Y,Z) voxel
+// coordinates, for the bottom-left readout.
+function mprPlanePointToVoxelXYZ(plane, vx, vy){
+  if(plane === 'axial') return [vx, vy, mprView.axial.index];
+  if(plane === 'coronal') return [vx, mprView.coronal.index, vy];
+  return [mprView.sagittal.index, vy, vx];
+}
+function updateMprCoordsDisplay(plane, lx, ly){
+  if(!dicomVolume) return;
+  const pv = mprView[plane];
+  const [sw, sh] = mprPlaneSpacing(plane);
+  const vx = (lx - pv.tx) / (sw * pv.scale), vy = (ly - pv.ty) / (sh * pv.scale);
+  const [X, Y, Z] = mprPlanePointToVoxelXYZ(plane, Math.round(vx), Math.round(vy));
+  const inBounds = X >= 0 && X < dicomVolume.cols && Y >= 0 && Y < dicomVolume.rows && Z >= 0 && Z < dicomVolume.numSlices;
+  $('mpr-coords').textContent = inBounds ? `X: ${X}   Y: ${Y}   Z: ${Z}` : 'X: –   Y: –   Z: –';
+}
+function clearMprCoordsDisplay(){
+  $('mpr-coords').textContent = 'X: –   Y: –   Z: –';
+}
+// Highlights whichever pane is currently "selected" (the one Up/Down arrow
+// keys act on — mprHoveredPane, updated on pointerenter).
+function updateMprPaneHighlight(){
+  MPR_PLANES.forEach(p => $(`mpr-pane-${p}`).classList.toggle('mpr-selected', p === mprHoveredPane));
 }
 // Maximizes one pane to fill the whole grid (hiding the other two), or
 // restores the normal 3-pane layout if the same plane is toggled again.
@@ -2550,9 +2613,12 @@ function setMprMode(on){
   $('stage').style.display = on ? 'none' : 'block';
   $('stage3d').style.display = on ? 'flex' : 'none';
   $('mpr3dToggleBtn').classList.toggle('sel', on);
-  if(on) requestAnimationFrame(() => {
-    MPR_PLANES.forEach(p => { fitMprPane(p); updateMprSliceUI(p); renderMprPane(p); });
-  });
+  if(on){
+    updateMprPaneHighlight();
+    requestAnimationFrame(() => {
+      MPR_PLANES.forEach(p => { fitMprPane(p); updateMprSliceUI(p); renderMprPane(p); });
+    });
+  }
 }
 function mprPaneInteraction(plane){
   const canvas = $(`mpr-${plane}-canvas`);
@@ -2576,13 +2642,23 @@ function mprPaneInteraction(plane){
       renderAllMprPanes();   // other panes' crosshair position depends on this plane's index
     }
   }, {passive: false});
-  canvas.addEventListener('pointerenter', () => { mprHoveredPane = plane; });
+  canvas.addEventListener('pointerenter', () => {
+    mprHoveredPane = plane;
+    updateMprPaneHighlight();
+  });
+  canvas.addEventListener('pointerleave', () => {
+    if(mprCrosshairDragging !== plane && !dragging && !mprDrag) clearMprCoordsDisplay();
+  });
   let dragging = false, lastX = 0, lastY = 0;
   canvas.addEventListener('pointerdown', (e) => {
     if(!dicomVolume) return;
+    const [lx, ly] = eventPosIn(canvas, e);
+    // an active drawing stroke on Axial takes priority over the crosshair
+    // handle — with a drawable tool selected and View Control off, the click
+    // is unambiguously meant to draw, even if it lands on the handle
     if(plane === 'axial' && isMprAxialDrawing()){
       canvas.setPointerCapture(e.pointerId);
-      const [vx, vy] = axialScreenToVoxel(...eventPosIn(canvas, e));
+      const [vx, vy] = axialScreenToVoxel(lx, ly);
       const z = mprView.axial.index;
       const s = structures[activeIdx];
       pushUndo();
@@ -2598,12 +2674,35 @@ function mprPaneInteraction(plane){
       renderMprPane('axial');
       return;
     }
+    // grabbing the crosshair's handle otherwise takes priority over panning —
+    // it's a distinct, always-available navigation control
+    if(mprCrosshairVisible){
+      const pv = mprView[plane];
+      const [sw, sh] = mprPlaneSpacing(plane);
+      const [vx0, vy0] = mprCrosshairPos(plane);
+      const scx = pv.tx + vx0 * sw * pv.scale, scy = pv.ty + vy0 * sh * pv.scale;
+      if(Math.hypot(lx - scx, ly - scy) <= MPR_CROSSHAIR_HANDLE_RADIUS){
+        mprCrosshairDragging = plane;
+        canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
     dragging = true; lastX = e.clientX; lastY = e.clientY;
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
+    const [lx, ly] = eventPosIn(canvas, e);
+    updateMprCoordsDisplay(plane, lx, ly);
+    if(mprCrosshairDragging === plane){
+      const pv = mprView[plane];
+      const [sw, sh] = mprPlaneSpacing(plane);
+      const vx = (lx - pv.tx) / (sw * pv.scale), vy = (ly - pv.ty) / (sh * pv.scale);
+      setMprCrosshairFromPlane(plane, vx, vy);
+      renderAllMprPanes();
+      return;
+    }
     if(mprDrag){
-      const [vx, vy] = axialScreenToVoxel(...eventPosIn(canvas, e));
+      const [vx, vy] = axialScreenToVoxel(lx, ly);
       const s = structures[activeIdx];
       if(mprDrag.kind === 'pencil'){
         mprDrag.pts.push([vx, vy]);
@@ -2622,6 +2721,7 @@ function mprPaneInteraction(plane){
     renderMprPane(plane);
   });
   const endDrag = () => {
+    mprCrosshairDragging = null;
     if(mprDrag){
       if(mprDrag.kind === 'pencil' && mprDrag.pts.length > 2 && activeIdx >= 0){
         const s = structures[activeIdx];
@@ -3830,7 +3930,10 @@ window.__sandbox = {
   dicomReadSequenceItems, dicomReadDatasetBounded,
   get mprCrosshairVisible(){ return mprCrosshairVisible; },
   get mprHoveredPane(){ return mprHoveredPane; },
+  get mprCrosshairDragging(){ return mprCrosshairDragging; },
   setMprCrosshairVisible, mprCrosshairPos, extractStructurePlaneMask,
+  setMprCrosshairFromPlane, mprPlanePointToVoxelXYZ, updateMprCoordsDisplay,
+  clearMprCoordsDisplay, updateMprPaneHighlight,
   refreshUI
 };
 </script>
