@@ -920,6 +920,25 @@ function nearMaskBoundary(mask, w, h, cx, cy, radius){
   }
   return false;
 }
+// Every boundary pixel of `mask` within `radius` of (cx,cy) — the Pencil
+// hover highlight uses this to light up the exact stretch of line a click
+// there would grab (same radius as nearMaskBoundary's hit-test, so what's
+// highlighted is exactly what's grabbable).
+function collectNearBoundaryPixels(mask, w, h, cx, cy, radius){
+  const pts = [];
+  if(!mask || radius <= 0) return pts;
+  const x0 = Math.max(0, Math.floor(cx - radius)), x1 = Math.min(w - 1, Math.ceil(cx + radius));
+  const y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(h - 1, Math.ceil(cy + radius));
+  const r2 = radius * radius;
+  for(let y = y0; y <= y1; y++){
+    for(let x = x0; x <= x1; x++){
+      const dx = x - cx, dy = y - cy;
+      if(dx * dx + dy * dy > r2) continue;
+      if(isMaskEdgePixel(mask, w, h, x, y)) pts.push([x, y]);
+    }
+  }
+  return pts;
+}
 
 /* --- exact Euclidean distance transform (Felzenszwalb & Huttenlocher) ---
    dt1d computes, for each q, min over p of (q-p)^2 + f[p] using the
@@ -2193,6 +2212,7 @@ let mprDrag = null;        // in-progress Axial draw stroke: {kind:'pencil'|'sta
 let mprCrosshairVisible = true;   // linked reticle showing where the other two planes currently are
 let mprCrosshairDragging = null;  // {plane, axis:'h'|'v'} for the line-end handle being dragged, or null
 let mprHoveredPane = 'axial';     // which pane Up/Down arrow keys act on, and which is highlighted
+let mprAxialHoverVoxel = null;    // [vx,vy] under the pointer while Pencil-hovering the Axial pane, or null
 const MPR_CROSSHAIR_HANDLE_RADIUS = 8;   // CSS px hit-test radius for grabbing the crosshair handle
 let mprWindowCenter = 0, mprWindowWidth = 1;
 const MPR_PLANES = ['axial', 'coronal', 'sagittal'];
@@ -2755,6 +2775,27 @@ function renderMprPane(plane){
     ctx.drawImage(overlay, pv.tx, pv.ty, dw, dh);
     drawMprContourOutline(ctx, mask, slice.width, slice.height, s.color, sw, sh, pv);
   }
+  // Pencil hover on Axial: light up the stretch of the active structure's
+  // own boundary within click-grab range (same radius as the pointerdown
+  // hit-test), so it's clear where a click-drag grabs the existing line.
+  if(plane === 'axial' && mprAxialHoverVoxel && activeIdx >= 0){
+    const s = structures[activeIdx];
+    const hoverMask = s.volMasks ? s.volMasks[pv.index] : null;
+    if(hoverMask){
+      const dia = mprBrushDiameterVoxels();
+      const [hvx, hvy] = mprAxialHoverVoxel;
+      const pts = collectNearBoundaryPixels(hoverMask, slice.width, slice.height, hvx, hvy, dia / 2);
+      if(pts.length){
+        ctx.fillStyle = '#fff35c';
+        for(const [px, py] of pts){
+          const scx = pv.tx + (px + 0.5) * sw * pv.scale, scy = pv.ty + (py + 0.5) * sh * pv.scale;
+          ctx.beginPath();
+          ctx.arc(scx, scy, Math.max(1.5, pv.scale * 0.6), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
   // Live pencil-path preview only applies to the Axial pane, where the point
   // coordinates in mprDrag.pts actually live.
   if(plane === 'axial' && mprDrag && mprDrag.kind === 'pencil' && mprDrag.pts.length > 1){
@@ -3001,11 +3042,21 @@ function mprPaneInteraction(plane){
       renderMprPane('axial');
       return;
     }
+    // Pencil hover on Axial: track the pointer's voxel position so the
+    // render loop can light up the nearby stretch of the structure's own
+    // boundary — showing exactly what a click there would grab.
+    if(plane === 'axial' && dicomVolume){
+      mprAxialHoverVoxel = (!dragging && tool === 'pencil' && !shiftDown) ? axialScreenToVoxel(lx, ly) : null;
+      renderMprPane('axial');
+    }
     if(!dragging) return;
     const pv = mprView[plane];
     pv.tx += e.clientX - lastX; pv.ty += e.clientY - lastY;
     lastX = e.clientX; lastY = e.clientY;
     renderMprPane(plane);
+  });
+  canvas.addEventListener('pointerleave', () => {
+    if(plane === 'axial' && mprAxialHoverVoxel){ mprAxialHoverVoxel = null; renderMprPane('axial'); }
   });
   const endDrag = () => {
     mprCrosshairDragging = null;
@@ -3476,6 +3527,25 @@ function draw(){
     ctx.lineWidth = 1;
     ctx.stroke();
   }
+  // Pencil hover: light up the stretch of the active structure's own
+  // boundary within click-grab range, so it's clear where a click-drag
+  // grabs the existing line (vs. starting a brand-new freehand shape).
+  if(cursorPos && !spaceDown && !drag && tool === 'pencil' && !shiftDown){
+    const s = active();
+    if(s){
+      const d = +$('brush-d').value;
+      const pts = collectNearBoundaryPixels(s.mask, W, H, cursorPos[0], cursorPos[1], d / 2);
+      if(pts.length){
+        ctx.fillStyle = '#fff35c';
+        for(const [px, py] of pts){
+          const [sx, sy] = toScr([px + 0.5, py + 0.5]);
+          ctx.beginPath();
+          ctx.arc(sx, sy, Math.max(1.5, view.scale * 0.6), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
 }
 
 /* ============================ structure list UI ============================ */
@@ -3720,6 +3790,7 @@ function setTool(t){
   refreshToolPreviews();
   updateStatus();
   scheduleDraw();
+  if(mprMode && dicomVolume) renderAllMprPanes();
 }
 document.querySelectorAll('.toolbtns button').forEach(b =>
   b.addEventListener('click', () => setTool(b.dataset.tool)));
