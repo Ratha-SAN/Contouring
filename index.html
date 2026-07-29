@@ -231,7 +231,7 @@
       <label><input type="radio" name="pencil-mode" value="subtract"> Subtract from structure</label>
       <div class="grouplbl">Line selection range: <b id="pencil-grab-d-lbl">24</b> px</div>
       <input type="range" id="pencil-grab-d" min="4" max="150" step="2" value="24">
-      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting near the existing contour (highlighted on hover, within the range above) instead grabs and locally reshapes that stretch of the line, following Mode above. Hold Shift to temporarily erase (Brush's diameter).</div>
+      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting near the existing contour (highlighted on hover, within the range above) instead grabs that stretch of the line and pulls it to follow the cursor. Hold Shift to temporarily erase (Brush's diameter).</div>
     </div>
 
     <div class="panel" id="set-shape">
@@ -940,6 +940,44 @@ function collectNearBoundaryPixels(mask, w, h, cx, cy, radius){
     }
   }
   return pts;
+}
+// Pushes `mask` a small step (stepDx,stepDy) — one animation frame's worth
+// of pointer movement — within `radius` of the current pointer (cx,cy),
+// like a Liquify "Forward Warp" brush: each output pixel samples back along
+// the step, scaled by a smoothstep falloff (full displacement at the
+// pointer, none at the radius edge). Called every pointermove with that
+// frame's own small delta (not the drag's total delta), so many calls
+// accumulate into a continuous pull that tracks the whole path the cursor
+// takes — a single call bridging a large distance would under-reach for
+// points away from dead centre, same as a real brush needs enough strokes
+// to cover ground.
+// Reads/writes the same live array: takes a small snapshot of just the
+// affected box first (source positions outside that box are safe to read
+// live, since this call never writes there).
+function applyMaskWarpStep(mask, w, h, cx, cy, stepDx, stepDy, radius){
+  if(radius <= 0 || (stepDx === 0 && stepDy === 0)) return;
+  const x0 = Math.max(0, Math.floor(cx - radius)), x1 = Math.min(w - 1, Math.ceil(cx + radius));
+  const y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(h - 1, Math.ceil(cy + radius));
+  if(x1 < x0 || y1 < y0) return;
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  const localSnap = new Uint8Array(bw * bh);
+  for(let y = y0; y <= y1; y++){
+    for(let x = x0; x <= x1; x++) localSnap[(y - y0) * bw + (x - x0)] = mask[y * w + x];
+  }
+  for(let y = y0; y <= y1; y++){
+    for(let x = x0; x <= x1; x++){
+      const ddx = x - cx, ddy = y - cy;
+      const dist = Math.sqrt(ddx * ddx + ddy * ddy);
+      if(dist > radius) continue;
+      const t = dist / radius;
+      const wgt = 1 - (3 * t * t - 2 * t * t * t);   // smoothstep ease: 1 at pointer, 0 at edge
+      const sx = Math.round(x - wgt * stepDx), sy = Math.round(y - wgt * stepDy);
+      let val = 0;
+      if(sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) val = localSnap[(sy - y0) * bw + (sx - x0)];
+      else if(sx >= 0 && sx < w && sy >= 0 && sy < h) val = mask[sy * w + sx];
+      mask[y * w + x] = val;
+    }
+  }
 }
 
 /* --- exact Euclidean distance transform (Felzenszwalb & Huttenlocher) ---
@@ -2975,26 +3013,30 @@ function mprPaneInteraction(plane){
       pushUndo();
       const cols = dicomVolume.cols, rows = dicomVolume.rows;
       const existingMask = s.volMasks ? s.volMasks[z] : null;
+      const grabR = mprPencilGrabDiameterVoxels() / 2;
       const grabbing = tool === 'pencil' && !shiftDown &&
-        existingMask && nearMaskBoundary(existingMask, cols, rows, vx, vy, mprPencilGrabDiameterVoxels() / 2);
-      const dia = grabbing ? mprPencilGrabDiameterVoxels() : mprBrushDiameterVoxels();
-      // Same stamp-value logic as the 2D canvas: Eraser always erases,
-      // Shift temporarily erases over Pencil/Brush, Brush follows its
-      // Paint/Erase mode, and Pencil clicked near its own existing contour
-      // "grabs" the line — follows Mode (Add/Subtract) just like a normal
-      // freehand fill, so the drag locally reshapes that stretch.
-      let val = null;
-      if(tool === 'eraser') val = 0;
-      else if(shiftDown) val = 0;
-      else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
-      else if(grabbing) val = getRadio('pencil-mode') === 'add' ? 1 : 0;
-      if(val !== null){
-        const mask = getVolMask(s, z, true);
-        mprStampDisc(mask, vx, vy, dia, val, cols, rows);
-        mprInvalidateSegCache(mask);
-        mprDrag = {kind: 'stamp', z, lastX: vx, lastY: vy, val, dia};
+        existingMask && nearMaskBoundary(existingMask, cols, rows, vx, vy, grabR);
+      if(grabbing){
+        // Click-drag on the existing contour: warp that patch to follow the
+        // cursor (a real "grab and pull the line"), not a stamp.
+        mprDrag = {kind: 'warp', z, lastX: vx, lastY: vy, radius: grabR};
       }else{
-        mprDrag = {kind: 'pencil', z, pts: [[vx, vy]]};
+        const dia = mprBrushDiameterVoxels();
+        // Same stamp-value logic as the 2D canvas: Eraser always erases,
+        // Shift temporarily erases over Pencil/Brush, Brush follows its
+        // Paint/Erase mode.
+        let val = null;
+        if(tool === 'eraser') val = 0;
+        else if(shiftDown) val = 0;
+        else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
+        if(val !== null){
+          const mask = getVolMask(s, z, true);
+          mprStampDisc(mask, vx, vy, dia, val, cols, rows);
+          mprInvalidateSegCache(mask);
+          mprDrag = {kind: 'stamp', z, lastX: vx, lastY: vy, val, dia};
+        }else{
+          mprDrag = {kind: 'pencil', z, pts: [[vx, vy]]};
+        }
       }
       renderMprPane('axial');
       return;
@@ -3046,6 +3088,11 @@ function mprPaneInteraction(plane){
       }else if(mprDrag.kind === 'stamp' && s){
         const mask = getVolMask(s, mprDrag.z, true);
         mprStampSegment(mask, mprDrag.lastX, mprDrag.lastY, vx, vy, mprDrag.dia, mprDrag.val, dicomVolume.cols, dicomVolume.rows);
+        mprInvalidateSegCache(mask);
+        mprDrag.lastX = vx; mprDrag.lastY = vy;
+      }else if(mprDrag.kind === 'warp' && s){
+        const mask = getVolMask(s, mprDrag.z, true);
+        applyMaskWarpStep(mask, dicomVolume.cols, dicomVolume.rows, vx, vy, vx - mprDrag.lastX, vy - mprDrag.lastY, mprDrag.radius);
         mprInvalidateSegCache(mask);
         mprDrag.lastX = vx; mprDrag.lastY = vy;
       }
@@ -3827,28 +3874,31 @@ cv.addEventListener('pointerdown', e => {
   if(!s) return;
 
   if(tool === 'pencil' || tool === 'brush' || tool === 'eraser'){
-    const grabbing = tool === 'pencil' && !shiftDown &&
-      nearMaskBoundary(s.mask, W, H, mx, my, +$('pencil-grab-d').value / 2);
-    const d = grabbing ? +$('pencil-grab-d').value
-      : tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
-    // Which stamp value to paint with, or null to fall back to Pencil's
-    // normal freehand-polygon draw: Eraser always erases; Shift temporarily
-    // erases over Pencil/Brush; Brush follows its Paint/Erase mode; and
-    // Pencil clicked near its own existing boundary "grabs" the line —
-    // follows Mode (Add/Subtract) just like a normal freehand fill, so the
-    // drag locally reshapes that stretch of contour.
-    let val = null;
-    if(tool === 'eraser') val = 0;
-    else if(shiftDown) val = 0;
-    else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
-    else if(grabbing) val = getRadio('pencil-mode') === 'add' ? 1 : 0;
-    if(val !== null){
+    const grabR = +$('pencil-grab-d').value / 2;
+    const grabbing = tool === 'pencil' && !shiftDown && nearMaskBoundary(s.mask, W, H, mx, my, grabR);
+    if(grabbing){
+      // Click-drag on the existing boundary: warp that patch of the mask to
+      // follow the cursor (a real "grab and pull the line"), not a stamp.
       pushUndo();
-      stampDisc(s.mask, mx, my, d, val);
-      s.dirty = true;
-      drag = {kind: 'stroke', last: [mx, my], d, val};
+      drag = {kind: 'warp', lastX: mx, lastY: my, radius: grabR};
     }else{
-      drag = {kind: 'pencil', pts: [[mx, my]]};
+      const d = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
+      // Which stamp value to paint with, or null to fall back to Pencil's
+      // normal freehand-polygon draw: Eraser always erases; Shift
+      // temporarily erases over Pencil/Brush; Brush follows its Paint/Erase
+      // mode.
+      let val = null;
+      if(tool === 'eraser') val = 0;
+      else if(shiftDown) val = 0;
+      else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
+      if(val !== null){
+        pushUndo();
+        stampDisc(s.mask, mx, my, d, val);
+        s.dirty = true;
+        drag = {kind: 'stroke', last: [mx, my], d, val};
+      }else{
+        drag = {kind: 'pencil', pts: [[mx, my]]};
+      }
     }
   }else if(tool === 'crop'){
     const cshape = getRadio('crop-shape');
@@ -3880,6 +3930,13 @@ cv.addEventListener('pointermove', e => {
         s.dirty = true;
       }
       drag.last = [mx, my];
+    }else if(drag.kind === 'warp'){
+      const s = active();
+      if(s){
+        applyMaskWarpStep(s.mask, W, H, mx, my, mx - drag.lastX, my - drag.lastY, drag.radius);
+        s.dirty = true;
+      }
+      drag.lastX = mx; drag.lastY = my;
     }else if(drag.kind === 'croprect'){
       drag.p1 = [mx, my];
     }else if(drag.kind === 'shape'){
