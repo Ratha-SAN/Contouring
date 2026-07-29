@@ -2257,22 +2257,28 @@ function extractAxialSlice(vol, z){
   return {width: cols, height: rows, values};
 }
 // Coronal: fixed row y, gathering that row from every axial slice — width=cols, height=numSlices.
+// Slices are sorted by ascending DICOM Z (which increases toward the head), so
+// z=0 is the most inferior slice; it's placed in the BOTTOM output row (and
+// z=numSlices-1, most superior/head-ward, at the top) so the head renders at
+// the top of the Coronal pane, matching standard radiological display.
 function extractCoronalSlice(vol, y){
   const {cols, rows, numSlices, data} = vol;
   const values = new Float32Array(cols * numSlices);
   for(let z = 0; z < numSlices; z++){
     const base = z * cols * rows + y * cols;
-    values.set(data.subarray(base, base + cols), z * cols);
+    values.set(data.subarray(base, base + cols), (numSlices - 1 - z) * cols);
   }
   return {width: cols, height: numSlices, values};
 }
 // Sagittal: fixed column x, gathering that column from every axial slice — width=rows, height=numSlices.
+// Same head-at-top flip as extractCoronalSlice above.
 function extractSagittalSlice(vol, x){
   const {cols, rows, numSlices, data} = vol;
   const values = new Float32Array(rows * numSlices);
   for(let z = 0; z < numSlices; z++){
     const sliceBase = z * cols * rows;
-    for(let y = 0; y < rows; y++) values[z * rows + y] = data[sliceBase + y * cols + x];
+    const outRow = numSlices - 1 - z;
+    for(let y = 0; y < rows; y++) values[outRow * rows + y] = data[sliceBase + y * cols + x];
   }
   return {width: rows, height: numSlices, values};
 }
@@ -2309,7 +2315,8 @@ function extractStructurePlaneMask(s, plane, index, vol){
       const m = s.volMasks[z];
       if(!m) continue;
       const base = index * cols;
-      for(let x = 0; x < cols; x++){ if(m[base + x]){ out[z * cols + x] = 1; any = true; } }
+      const outRow = numSlices - 1 - z;
+      for(let x = 0; x < cols; x++){ if(m[base + x]){ out[outRow * cols + x] = 1; any = true; } }
     }
     return any ? out : null;
   }
@@ -2318,7 +2325,8 @@ function extractStructurePlaneMask(s, plane, index, vol){
   for(let z = 0; z < numSlices; z++){
     const m = s.volMasks[z];
     if(!m) continue;
-    for(let y = 0; y < rows; y++){ if(m[y * cols + index]){ out[z * rows + y] = 1; any = true; } }
+    const outRow = numSlices - 1 - z;
+    for(let y = 0; y < rows; y++){ if(m[y * cols + index]){ out[outRow * rows + y] = 1; any = true; } }
   }
   return any ? out : null;
 }
@@ -2326,8 +2334,9 @@ function extractStructurePlaneMask(s, plane, index, vol){
 // THIS plane's own coordinate system — used to draw the linked crosshair.
 function mprCrosshairPos(plane){
   if(plane === 'axial') return [mprView.sagittal.index, mprView.coronal.index];
-  if(plane === 'coronal') return [mprView.sagittal.index, mprView.axial.index];
-  return [mprView.coronal.index, mprView.axial.index];   // sagittal
+  const flippedZ = dicomVolume.numSlices - 1 - mprView.axial.index;
+  if(plane === 'coronal') return [mprView.sagittal.index, flippedZ];
+  return [mprView.coronal.index, flippedZ];   // sagittal
 }
 function windowSliceToImageData(slice, center, width){
   const {width: w, height: h, values} = slice;
@@ -2727,10 +2736,10 @@ function setMprCrosshairAxis(plane, axis, value){
     else mprView.coronal.index = clamp(value, rows - 1);
   }else if(plane === 'coronal'){
     if(axis === 'x') mprView.sagittal.index = clamp(value, cols - 1);
-    else mprView.axial.index = clamp(value, numSlices - 1);
+    else mprView.axial.index = clamp(numSlices - 1 - value, numSlices - 1);
   }else{
     if(axis === 'x') mprView.coronal.index = clamp(value, rows - 1);
-    else mprView.axial.index = clamp(value, numSlices - 1);
+    else mprView.axial.index = clamp(numSlices - 1 - value, numSlices - 1);
   }
   MPR_PLANES.forEach(updateMprSliceUI);
 }
@@ -3114,10 +3123,12 @@ function getDoseOverlayCanvas(plane, index){
     toXYZ = (cx, cy) => [vol.originX + cx * vol.spacingX, vol.originY + cy * vol.spacingY, vol.originZ + index * vol.spacingZ];
   }else if(plane === 'coronal'){
     w = vol.cols; h = vol.numSlices;
-    toXYZ = (cx, cz) => [vol.originX + cx * vol.spacingX, vol.originY + index * vol.spacingY, vol.originZ + cz * vol.spacingZ];
+    // cz is the displayed row (head-at-top, per extractCoronalSlice's flip);
+    // convert back to the underlying ascending-Z slice index before scaling.
+    toXYZ = (cx, cz) => [vol.originX + cx * vol.spacingX, vol.originY + index * vol.spacingY, vol.originZ + (vol.numSlices - 1 - cz) * vol.spacingZ];
   }else{
     w = vol.rows; h = vol.numSlices;
-    toXYZ = (cy, cz) => [vol.originX + index * vol.spacingX, vol.originY + cy * vol.spacingY, vol.originZ + cz * vol.spacingZ];
+    toXYZ = (cy, cz) => [vol.originX + index * vol.spacingX, vol.originY + cy * vol.spacingY, vol.originZ + (vol.numSlices - 1 - cz) * vol.spacingZ];
   }
   const out = new Uint8ClampedArray(w * h * 4);
   const doseMax = doseVolume.doseMax || 1;
