@@ -446,6 +446,7 @@
       <div class="mpr-toolbar">
         <button id="mprNavToggleBtn" class="sel" title="When on, dragging pans a view. When off, the active drawing tool (Pencil/Brush/Eraser) draws on the Axial slice instead.">View Control: On</button>
         <button id="mprCrosshairToggleBtn" class="sel" title="Show/hide the linked crosshair marking where the other two planes currently are">Crosshair</button>
+        <button id="mprResetViewBtn" title="Reset pan/zoom back to Fit on all three views">Reset View</button>
         <span class="glabel">Window</span>
         <label for="mprLevelInput">L</label>
         <input type="number" id="mprLevelInput" step="1" style="width:64px" title="Window Level (center)">
@@ -454,6 +455,8 @@
         <span class="glabel">Dose</span>
         <button id="mprDoseToggleBtn" disabled title="Show/hide the RT Dose color-wash overlay">Dose</button>
         <input type="range" id="mprDoseOpacity" min="0" max="1" step="0.05" value="0.5" disabled title="Dose overlay opacity">
+        <span class="glabel">Contour</span>
+        <button id="mprInterpolateBtn" title="Fill the empty Axial slices between the active structure's drawn contours, shape-interpolated between each pair">Interpolate</button>
       </div>
       <div class="mpr-grid">
         <div class="mpr-pane" id="mpr-pane-axial" data-plane="axial">
@@ -2163,6 +2166,12 @@ const MPR_CROSSHAIR_HANDLE_RADIUS = 8;   // CSS px hit-test radius for grabbing 
 let mprWindowCenter = 0, mprWindowWidth = 1;
 const MPR_PLANES = ['axial', 'coronal', 'sagittal'];
 const MPR_DRAWABLE_TOOLS = ['pencil', 'brush', 'eraser'];
+// Each pane's screen axes, in DICOM volume-axis terms: axial is (X across,
+// Y down), coronal is (X across, Z down), sagittal is (Y across, Z down) —
+// matching extractAxialSlice/extractCoronalSlice/extractSagittalSlice above,
+// which all fill their output row-major with the second letter as the row.
+const MPR_AXIS_LETTERS = {axial: ['X', 'Y'], coronal: ['X', 'Z'], sagittal: ['Y', 'Z']};
+const MPR_AXIS_COLOR = {X: '#ff5c5c', Y: '#5cff8a', Z: '#5cb0ff'};
 const mprPolyCv = document.createElement('canvas');
 const mprPolyCtx = mprPolyCv.getContext('2d', {willReadFrequently: true});
 const mprView = {
@@ -2370,6 +2379,12 @@ function fitMprPane(plane){
   pv.tx = (cw - physW * scale) / 2;
   pv.ty = (ch - physH * scale) / 2;
 }
+// "Reset View": puts pan/zoom on all three panes back to Fit, same as
+// pressing each pane's own Fit button in turn.
+function resetMprView(){
+  MPR_PLANES.forEach(fitMprPane);
+  renderAllMprPanes();
+}
 // Width/height-parameterized siblings of polygonRegion/applyRegion/stampDisc/
 // stampSegment (mask math, above), kept separate from those so Axial drawing
 // (arbitrary volume resolution) never touches the 2D canvas's fixed-W/H code.
@@ -2419,6 +2434,104 @@ function getVolMask(structure, z, create){
   if(!structure.volMasks[z] && create) structure.volMasks[z] = new Uint8Array(dicomVolume.cols * dicomVolume.rows);
   return structure.volMasks[z];
 }
+/* ===================== Axial contour interpolation ===================== */
+// Shape-based (signed-distance) interpolation of a structure's contour
+// across empty Axial slices between two drawn ("keyframe") slices, the
+// standard technique used by contouring software for filling in a gap.
+function mprHasAnyVoxel(mask){
+  if(!mask) return false;
+  for(let i = 0; i < mask.length; i++) if(mask[i]) return true;
+  return false;
+}
+// 1D squared-distance transform (Felzenszwalt & Huttenlocher): for a
+// function f over indices 0..n-1 (0 at "feature" positions, Infinity
+// elsewhere), returns the squared distance from each index to the nearest
+// feature.
+function mprDt1d(f, n){
+  const d = new Float32Array(n);
+  const v = new Int32Array(n);
+  const z = new Float32Array(n + 1);
+  let k = 0;
+  v[0] = 0; z[0] = -Infinity; z[1] = Infinity;
+  for(let q = 1; q < n; q++){
+    let s;
+    for(;;){
+      s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      if(s <= z[k] && k > 0){ k--; } else break;
+    }
+    k++;
+    v[k] = q; z[k] = s; z[k + 1] = Infinity;
+  }
+  k = 0;
+  for(let q = 0; q < n; q++){
+    while(z[k + 1] < q) k++;
+    d[q] = (q - v[k]) * (q - v[k]) + f[v[k]];
+  }
+  return d;
+}
+// Squared Euclidean distance from every pixel to the nearest pixel where
+// mask === targetVal (0 or 1), as a cols*rows Float32Array.
+function mprDistanceTransform(mask, cols, rows, targetVal){
+  const INF = 1e20;
+  const tmp = new Float32Array(cols * rows);
+  const colBuf = new Float32Array(rows);
+  for(let x = 0; x < cols; x++){
+    for(let y = 0; y < rows; y++) colBuf[y] = mask[y * cols + x] === targetVal ? 0 : INF;
+    const d = mprDt1d(colBuf, rows);
+    for(let y = 0; y < rows; y++) tmp[y * cols + x] = d[y];
+  }
+  const out = new Float32Array(cols * rows);
+  const rowBuf = new Float32Array(cols);
+  for(let y = 0; y < rows; y++){
+    for(let x = 0; x < cols; x++) rowBuf[x] = tmp[y * cols + x];
+    const d = mprDt1d(rowBuf, cols);
+    for(let x = 0; x < cols; x++) out[y * cols + x] = d[x];
+  }
+  return out;
+}
+// Signed distance field: negative inside the mask, positive outside,
+// magnitude = distance (in voxels) to the mask boundary.
+function mprSignedDistanceField(mask, cols, rows){
+  const distToFg = mprDistanceTransform(mask, cols, rows, 1);
+  const distToBg = mprDistanceTransform(mask, cols, rows, 0);
+  const out = new Float32Array(cols * rows);
+  for(let i = 0; i < cols * rows; i++){
+    out[i] = mask[i] ? -Math.sqrt(distToBg[i]) : Math.sqrt(distToFg[i]);
+  }
+  return out;
+}
+// Fills every empty Axial slice strictly between each pair of consecutive
+// drawn ("keyframe") slices of the active structure, by linearly blending
+// the two keyframes' signed distance fields and re-thresholding at 0.
+// Never overwrites a slice that already has a contour. Returns the number
+// of slices filled in.
+function interpolateActiveStructureContours(){
+  if(!dicomVolume) return {error: 'load a CT/MR series first'};
+  const s = active();
+  if(!s || !s.volMasks) return {error: 'select a structure with at least two Axial contours drawn on separate slices'};
+  const {cols, rows, numSlices} = dicomVolume;
+  const keyframes = [];
+  for(let z = 0; z < numSlices; z++) if(mprHasAnyVoxel(s.volMasks[z])) keyframes.push(z);
+  if(keyframes.length < 2) return {error: 'draw the contour on at least two Axial slices first, then Interpolate'};
+  let filled = 0;
+  for(let i = 0; i < keyframes.length - 1; i++){
+    const z0 = keyframes[i], z1 = keyframes[i + 1];
+    if(z1 - z0 < 2) continue;   // adjacent keyframes, no gap to fill
+    const sdA = mprSignedDistanceField(s.volMasks[z0], cols, rows);
+    const sdB = mprSignedDistanceField(s.volMasks[z1], cols, rows);
+    for(let z = z0 + 1; z < z1; z++){
+      if(mprHasAnyVoxel(s.volMasks[z])) continue;   // don't clobber a manually-drawn slice
+      const t = (z - z0) / (z1 - z0);
+      const out = new Uint8Array(cols * rows);
+      for(let i2 = 0; i2 < out.length; i2++){
+        if(sdA[i2] * (1 - t) + sdB[i2] * t <= 0) out[i2] = 1;
+      }
+      s.volMasks[z] = out;
+      filled++;
+    }
+  }
+  return {filled};
+}
 // Reuses the shared Brush/Eraser diameter slider (calibrated in px at the 2D
 // canvas's fixed PX_PER_MM), converted through real mm to volume voxels so
 // the same physical brush size feels consistent between 2D and 3D modes.
@@ -2460,6 +2573,28 @@ function mprMaskOverlayCanvas(mask, w, h, color){
   cx.putImageData(img, 0, 0);
   return c;
 }
+// Small fixed (non-panning/zooming) X/Y/Z axis indicator in a pane's top-left
+// corner, showing which screen direction each DICOM volume axis runs in.
+function drawMprAxisIndicator(ctx, plane){
+  const [h, v] = MPR_AXIS_LETTERS[plane];
+  const ox = 24, oy = 24, len = 16;
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.font = 'bold 11px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.strokeStyle = MPR_AXIS_COLOR[h];
+  ctx.fillStyle = MPR_AXIS_COLOR[h];
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + len, oy); ctx.stroke();
+  ctx.textAlign = 'left';
+  ctx.fillText(h, ox + len + 3, oy);
+  ctx.strokeStyle = MPR_AXIS_COLOR[v];
+  ctx.fillStyle = MPR_AXIS_COLOR[v];
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox, oy + len); ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillText(v, ox, oy + len + 10);
+  ctx.beginPath(); ctx.fillStyle = '#ccc'; ctx.arc(ox, oy, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
 function renderMprPane(plane){
   const canvas = $(`mpr-${plane}-canvas`);
   const wrap = canvas.parentElement;
@@ -2471,6 +2606,7 @@ function renderMprPane(plane){
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, cw, ch);
+  drawMprAxisIndicator(ctx, plane);
   if(!dicomVolume) return;
 
   const pv = mprView[plane];
@@ -3829,6 +3965,15 @@ $('mprDoseOpacity').addEventListener('input', () => setMprDoseOpacity(+$('mprDos
 $('mpr3dToggleBtn').addEventListener('click', () => setMprMode(!mprMode));
 $('mprNavToggleBtn').addEventListener('click', () => setMpr3dNavMode(!mpr3dNavMode));
 $('mprCrosshairToggleBtn').addEventListener('click', () => setMprCrosshairVisible(!mprCrosshairVisible));
+$('mprResetViewBtn').addEventListener('click', resetMprView);
+$('mprInterpolateBtn').addEventListener('click', () => {
+  pushUndo();
+  const {filled, error} = interpolateActiveStructureContours();
+  if(error){ undoStack.pop(); refreshHistBtns(); alert('Interpolate: ' + error); return; }
+  if(!filled){ undoStack.pop(); refreshHistBtns(); alert('Interpolate: no empty slices between the drawn contours — nothing to fill.'); return; }
+  renderAllMprPanes();
+  refreshHistBtns();
+});
 $('mprLevelInput').addEventListener('input', applyMprWindowLevel);
 $('mprWidthInput').addEventListener('input', applyMprWindowLevel);
 MPR_PLANES.forEach(mprPaneInteraction);
