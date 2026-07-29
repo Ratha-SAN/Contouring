@@ -229,7 +229,9 @@
       <div class="grouplbl">Mode</div>
       <label><input type="radio" name="pencil-mode" value="add" checked> Add to structure</label>
       <label><input type="radio" name="pencil-mode" value="subtract"> Subtract from structure</label>
-      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting on the existing contour instead grabs and locally reshapes that stretch of the line. Hold Shift to temporarily erase (Brush's diameter).</div>
+      <div class="grouplbl">Line selection range: <b id="pencil-grab-d-lbl">24</b> px</div>
+      <input type="range" id="pencil-grab-d" min="4" max="150" step="2" value="24">
+      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting near the existing contour (highlighted on hover, within the range above) instead grabs and locally reshapes that stretch of the line, following Mode above. Hold Shift to temporarily erase (Brush's diameter).</div>
     </div>
 
     <div class="panel" id="set-shape">
@@ -2664,14 +2666,23 @@ function interpolateActiveStructureContours(){
   }
   return {filled};
 }
-// Reuses the shared Brush/Eraser diameter slider (calibrated in px at the 2D
-// canvas's fixed PX_PER_MM), converted through real mm to volume voxels so
-// the same physical brush size feels consistent between 2D and 3D modes.
-function mprBrushDiameterVoxels(){
-  const px = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
+// Converts a diameter calibrated in px at the 2D canvas's fixed PX_PER_MM
+// into volume voxels through real mm, so a given px size feels like the same
+// physical size between 2D and 3D modes.
+function mprVoxelDiameterFromPx(px){
   const mm = px / PX_PER_MM;
   const avgSpacing = ((dicomVolume.spacingX + dicomVolume.spacingY) / 2) || 1;
   return Math.max(1, mm / avgSpacing);
+}
+// Reuses the shared Brush/Eraser diameter slider.
+function mprBrushDiameterVoxels(){
+  const px = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
+  return mprVoxelDiameterFromPx(px);
+}
+// Pencil's own "line selection range" slider — independent of Brush/Eraser,
+// since it controls hover-highlight/grab tolerance rather than paint width.
+function mprPencilGrabDiameterVoxels(){
+  return mprVoxelDiameterFromPx(+$('pencil-grab-d').value);
 }
 function eventPosIn(canvas, e){
   const r = canvas.getBoundingClientRect();
@@ -2782,7 +2793,7 @@ function renderMprPane(plane){
     const s = structures[activeIdx];
     const hoverMask = s.volMasks ? s.volMasks[pv.index] : null;
     if(hoverMask){
-      const dia = mprBrushDiameterVoxels();
+      const dia = mprPencilGrabDiameterVoxels();
       const [hvx, hvy] = mprAxialHoverVoxel;
       const pts = collectNearBoundaryPixels(hoverMask, slice.width, slice.height, hvx, hvy, dia / 2);
       if(pts.length){
@@ -2962,22 +2973,21 @@ function mprPaneInteraction(plane){
       const z = mprView.axial.index;
       const s = structures[activeIdx];
       pushUndo();
-      const dia = mprBrushDiameterVoxels();
       const cols = dicomVolume.cols, rows = dicomVolume.rows;
       const existingMask = s.volMasks ? s.volMasks[z] : null;
+      const grabbing = tool === 'pencil' && !shiftDown &&
+        existingMask && nearMaskBoundary(existingMask, cols, rows, vx, vy, mprPencilGrabDiameterVoxels() / 2);
+      const dia = grabbing ? mprPencilGrabDiameterVoxels() : mprBrushDiameterVoxels();
       // Same stamp-value logic as the 2D canvas: Eraser always erases,
       // Shift temporarily erases over Pencil/Brush, Brush follows its
       // Paint/Erase mode, and Pencil clicked near its own existing contour
-      // "grabs" the line so the drag locally reshapes that stretch.
+      // "grabs" the line — follows Mode (Add/Subtract) just like a normal
+      // freehand fill, so the drag locally reshapes that stretch.
       let val = null;
       if(tool === 'eraser') val = 0;
       else if(shiftDown) val = 0;
       else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
-      else if(existingMask && nearMaskBoundary(existingMask, cols, rows, vx, vy, dia / 2)){
-        const ix = Math.max(0, Math.min(cols - 1, Math.round(vx)));
-        const iy = Math.max(0, Math.min(rows - 1, Math.round(vy)));
-        val = existingMask[iy * cols + ix] ? 1 : 0;
-      }
+      else if(grabbing) val = getRadio('pencil-mode') === 'add' ? 1 : 0;
       if(val !== null){
         const mask = getVolMask(s, z, true);
         mprStampDisc(mask, vx, vy, dia, val, cols, rows);
@@ -3533,7 +3543,7 @@ function draw(){
   if(cursorPos && !spaceDown && !drag && tool === 'pencil' && !shiftDown){
     const s = active();
     if(s){
-      const d = +$('brush-d').value;
+      const d = +$('pencil-grab-d').value;
       const pts = collectNearBoundaryPixels(s.mask, W, H, cursorPos[0], cursorPos[1], d / 2);
       if(pts.length){
         ctx.fillStyle = '#fff35c';
@@ -3817,22 +3827,21 @@ cv.addEventListener('pointerdown', e => {
   if(!s) return;
 
   if(tool === 'pencil' || tool === 'brush' || tool === 'eraser'){
-    const d = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
+    const grabbing = tool === 'pencil' && !shiftDown &&
+      nearMaskBoundary(s.mask, W, H, mx, my, +$('pencil-grab-d').value / 2);
+    const d = grabbing ? +$('pencil-grab-d').value
+      : tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
     // Which stamp value to paint with, or null to fall back to Pencil's
     // normal freehand-polygon draw: Eraser always erases; Shift temporarily
     // erases over Pencil/Brush; Brush follows its Paint/Erase mode; and
     // Pencil clicked near its own existing boundary "grabs" the line —
-    // painting or erasing depending on which side of the boundary the click
-    // landed on, so the drag locally reshapes that stretch of contour.
+    // follows Mode (Add/Subtract) just like a normal freehand fill, so the
+    // drag locally reshapes that stretch of contour.
     let val = null;
     if(tool === 'eraser') val = 0;
     else if(shiftDown) val = 0;
     else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
-    else if(nearMaskBoundary(s.mask, W, H, mx, my, d / 2)){
-      const ix = Math.max(0, Math.min(W - 1, Math.round(mx)));
-      const iy = Math.max(0, Math.min(H - 1, Math.round(my)));
-      val = s.mask[iy * W + ix] ? 1 : 0;
-    }
+    else if(grabbing) val = getRadio('pencil-mode') === 'add' ? 1 : 0;
     if(val !== null){
       pushUndo();
       stampDisc(s.mask, mx, my, d, val);
@@ -3975,6 +3984,11 @@ $('brush-d').addEventListener('input', () => {
 });
 $('eraser-d').addEventListener('input', () => {
   $('eraser-d-lbl').textContent = $('eraser-d').value; scheduleDraw();
+});
+$('pencil-grab-d').addEventListener('input', () => {
+  $('pencil-grab-d-lbl').textContent = $('pencil-grab-d').value;
+  scheduleDraw();
+  if(mprMode && dicomVolume) renderAllMprPanes();
 });
 $('shape-sides').addEventListener('input', () => {
   $('shape-sides-lbl').textContent = $('shape-sides').value; scheduleDraw();
