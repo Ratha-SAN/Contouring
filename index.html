@@ -143,9 +143,6 @@
   .mpr-canvaswrap{flex:1; position:relative; min-height:0; background:#000; overflow:hidden;}
   .mpr-canvaswrap canvas{position:absolute; inset:0; width:100%; height:100%;
     touch-action:none; cursor:grab;}
-  .mpr-pane-coords{position:absolute; left:6px; bottom:6px; padding:2px 7px;
-    background:rgba(0,0,0,.65); color:var(--text); font-size:11px; font-variant-numeric:tabular-nums;
-    border-radius:4px; pointer-events:none; z-index:6; white-space:nowrap;}
   .mpr-slider{width:100%; margin:0; padding:4px 8px; box-sizing:border-box;}
   .mpr-hint{padding:6px 12px; color:var(--dim); font-size:11px; border-top:1px solid var(--border);}
 
@@ -224,6 +221,7 @@
       <button data-tool="boolean">Boolean</button>
       <button data-tool="extend">Extend</button>
       <button data-tool="translate">Translate</button>
+      <button data-tool="interpolate">Interpolate</button>
     </div>
 
     <div class="panel" id="set-pencil">
@@ -335,6 +333,13 @@
       <div class="hint" id="trans-conv"></div>
       <button class="apply" id="trans-apply">Apply</button>
       <div class="hint">Shifts the whole structure. Preview outline shown in yellow. Pixels pushed past the canvas edge are clipped.</div>
+    </div>
+
+    <div class="panel" id="set-interpolate">
+      <h3>Interpolate</h3>
+      <div class="hint">Fills the empty Axial slices between the active structure's drawn contours, shape-interpolated between each pair of drawn slices.</div>
+      <button class="apply" id="interp-apply">Interpolate contours</button>
+      <div class="hint">3D view only. Draw the contour on at least two Axial slices first, then apply. Slices you've already drawn are never overwritten.</div>
     </div>
 
     <div id="navhint">Wheel: zoom &middot; Space/middle-drag: pan<br>
@@ -455,8 +460,6 @@
         <span class="glabel">Dose</span>
         <button id="mprDoseToggleBtn" disabled title="Show/hide the RT Dose color-wash overlay">Dose</button>
         <input type="range" id="mprDoseOpacity" min="0" max="1" step="0.05" value="0.5" disabled title="Dose overlay opacity">
-        <span class="glabel">Contour</span>
-        <button id="mprInterpolateBtn" title="Fill the empty Axial slices between the active structure's drawn contours, shape-interpolated between each pair">Interpolate</button>
       </div>
       <div class="mpr-grid">
         <div class="mpr-pane" id="mpr-pane-axial" data-plane="axial">
@@ -469,7 +472,6 @@
           </div>
           <div class="mpr-canvaswrap">
             <canvas id="mpr-axial-canvas"></canvas>
-            <div class="mpr-pane-coords" id="mpr-axial-coords">X: –   Y: –</div>
           </div>
           <input type="range" class="mpr-slider" id="mpr-axial-slider" min="0" max="0" value="0">
         </div>
@@ -483,7 +485,6 @@
           </div>
           <div class="mpr-canvaswrap">
             <canvas id="mpr-coronal-canvas"></canvas>
-            <div class="mpr-pane-coords" id="mpr-coronal-coords">X: –   Y: –</div>
           </div>
           <input type="range" class="mpr-slider" id="mpr-coronal-slider" min="0" max="0" value="0">
         </div>
@@ -497,7 +498,6 @@
           </div>
           <div class="mpr-canvaswrap">
             <canvas id="mpr-sagittal-canvas"></canvas>
-            <div class="mpr-pane-coords" id="mpr-sagittal-coords">X: –   Y: –</div>
           </div>
           <input type="range" class="mpr-slider" id="mpr-sagittal-slider" min="0" max="0" value="0">
         </div>
@@ -2573,11 +2573,13 @@ function mprMaskOverlayCanvas(mask, w, h, color){
   cx.putImageData(img, 0, 0);
   return c;
 }
-// Small fixed (non-panning/zooming) X/Y/Z axis indicator in a pane's top-left
-// corner, showing which screen direction each DICOM volume axis runs in.
-function drawMprAxisIndicator(ctx, plane){
+// Small fixed (non-panning/zooming) X/Y/Z axis indicator in a pane's
+// bottom-left corner, showing which screen direction each DICOM volume axis
+// runs in (arrows point in the direction of increasing voxel index).
+function drawMprAxisIndicator(ctx, plane, ch){
   const [h, v] = MPR_AXIS_LETTERS[plane];
-  const ox = 24, oy = 24, len = 16;
+  const len = 16;
+  const ox = 24, oy = Math.max(24, ch - 56);
   ctx.save();
   ctx.lineWidth = 2;
   ctx.font = 'bold 11px sans-serif';
@@ -2606,7 +2608,7 @@ function renderMprPane(plane){
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, cw, ch);
-  drawMprAxisIndicator(ctx, plane);
+  drawMprAxisIndicator(ctx, plane, ch);
   if(!dicomVolume) return;
 
   const pv = mprView[plane];
@@ -2729,21 +2731,6 @@ function setMprCrosshairAxis(plane, axis, value){
   }
   MPR_PLANES.forEach(updateMprSliceUI);
 }
-// Per-pane 2D image-coordinate readout (this plane's own column/row under the
-// pointer, not a combined 3D position) shown in that pane's bottom-left corner.
-function updateMprPaneCoords(plane, lx, ly){
-  if(!dicomVolume) return;
-  const pv = mprView[plane];
-  const [sw, sh] = mprPlaneSpacing(plane);
-  const vx = Math.round((lx - pv.tx) / (sw * pv.scale)), vy = Math.round((ly - pv.ty) / (sh * pv.scale));
-  const maxX = plane === 'sagittal' ? dicomVolume.rows - 1 : dicomVolume.cols - 1;
-  const maxY = plane === 'axial' ? dicomVolume.rows - 1 : dicomVolume.numSlices - 1;
-  const inBounds = vx >= 0 && vx <= maxX && vy >= 0 && vy <= maxY;
-  $(`mpr-${plane}-coords`).textContent = inBounds ? `X: ${vx}   Y: ${vy}` : 'X: –   Y: –';
-}
-function clearMprPaneCoords(plane){
-  $(`mpr-${plane}-coords`).textContent = 'X: –   Y: –';
-}
 // Highlights whichever pane is currently "selected" (the one Up/Down arrow
 // keys act on — mprHoveredPane, updated on pointerenter).
 function updateMprPaneHighlight(){
@@ -2803,9 +2790,6 @@ function mprPaneInteraction(plane){
     mprHoveredPane = plane;
     updateMprPaneHighlight();
   });
-  canvas.addEventListener('pointerleave', () => {
-    if((!mprCrosshairDragging || mprCrosshairDragging.plane !== plane) && !dragging && !mprDrag) clearMprPaneCoords(plane);
-  });
   let dragging = false, lastX = 0, lastY = 0;
   canvas.addEventListener('pointerdown', (e) => {
     if(!dicomVolume) return;
@@ -2857,7 +2841,6 @@ function mprPaneInteraction(plane){
   });
   canvas.addEventListener('pointermove', (e) => {
     const [lx, ly] = eventPosIn(canvas, e);
-    updateMprPaneCoords(plane, lx, ly);
     if(mprCrosshairDragging && mprCrosshairDragging.plane === plane){
       const pv = mprView[plane];
       const [sw, sh] = mprPlaneSpacing(plane);
@@ -3556,7 +3539,8 @@ function renderList(){
 }
 /* ============================ status bar ============================ */
 const TOOL_NAMES = {pencil:'Pencil', shape:'Shape', brush:'Brush', eraser:'Eraser',
-                    crop:'Crop', boolean:'Boolean', extend:'Extend', translate:'Translate'};
+                    crop:'Crop', boolean:'Boolean', extend:'Extend', translate:'Translate',
+                    interpolate:'Interpolate'};
 function updateStatus(){
   $('st-tool').textContent = TOOL_NAMES[tool];
   $('st-struct').textContent = active() ? active().name : 'none';
@@ -3966,7 +3950,7 @@ $('mpr3dToggleBtn').addEventListener('click', () => setMprMode(!mprMode));
 $('mprNavToggleBtn').addEventListener('click', () => setMpr3dNavMode(!mpr3dNavMode));
 $('mprCrosshairToggleBtn').addEventListener('click', () => setMprCrosshairVisible(!mprCrosshairVisible));
 $('mprResetViewBtn').addEventListener('click', resetMprView);
-$('mprInterpolateBtn').addEventListener('click', () => {
+$('interp-apply').addEventListener('click', () => {
   pushUndo();
   const {filled, error} = interpolateActiveStructureContours();
   if(error){ undoStack.pop(); refreshHistBtns(); alert('Interpolate: ' + error); return; }
@@ -4111,7 +4095,7 @@ window.__sandbox = {
   get mprHoveredPane(){ return mprHoveredPane; },
   get mprCrosshairDragging(){ return mprCrosshairDragging; },
   setMprCrosshairVisible, mprCrosshairPos, extractStructurePlaneMask,
-  setMprCrosshairAxis, updateMprPaneCoords, clearMprPaneCoords,
+  setMprCrosshairAxis,
   mprCrosshairHandlePos, updateMprPaneHighlight,
   refreshUI
 };
