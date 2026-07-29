@@ -2500,6 +2500,78 @@ function mprSignedDistanceField(mask, cols, rows){
   }
   return out;
 }
+/* ===================== High-resolution contour outline ===================== */
+// Traces the zero level-set of a continuous scalar field (here, a signed
+// distance field) via marching squares, with linear interpolation along
+// each cell edge — this is what gives the outline sub-voxel, smoothly
+// curved precision instead of the blocky look of a per-pixel mask edge.
+// Returns a flat list of 2-point segments (each [[x0,y0],[x1,y1]]) in the
+// field's own grid coordinates.
+function mprMarchingSquares(field, cols, rows){
+  const segs = [];
+  const val = (x, y) => field[y * cols + x];
+  const lerp = (va, vb) => va / (va - vb || 1e-9);
+  for(let y = 0; y < rows - 1; y++){
+    for(let x = 0; x < cols - 1; x++){
+      const tl = val(x, y), tr = val(x + 1, y), bl = val(x, y + 1), br = val(x + 1, y + 1);
+      let c = 0;
+      if(bl < 0) c |= 1;
+      if(br < 0) c |= 2;
+      if(tr < 0) c |= 4;
+      if(tl < 0) c |= 8;
+      if(c === 0 || c === 15) continue;
+      const T = () => [x + lerp(tl, tr), y];
+      const R = () => [x + 1, y + lerp(tr, br)];
+      const B = () => [x + lerp(bl, br), y + 1];
+      const L = () => [x, y + lerp(tl, bl)];
+      switch(c){
+        case 1: case 14: segs.push([L(), B()]); break;
+        case 2: case 13: segs.push([B(), R()]); break;
+        case 3: case 12: segs.push([L(), R()]); break;
+        case 4: case 11: segs.push([T(), R()]); break;
+        case 6: case 9: segs.push([T(), B()]); break;
+        case 7: case 8: segs.push([T(), L()]); break;
+        case 5: segs.push([T(), L()], [B(), R()]); break;   // saddle
+        case 10: segs.push([T(), R()], [B(), L()]); break;  // saddle
+      }
+    }
+  }
+  return segs;
+}
+// mask (Uint8Array) -> {w, h, segments}. Structure masks are stable object
+// references except while actively being drawn on (stamped in place), so
+// this cache is invalidated explicitly at each mutation site below rather
+// than by content-hashing every frame.
+const mprSegCache = new WeakMap();
+function mprInvalidateSegCache(mask){
+  if(mask) mprSegCache.delete(mask);
+}
+function getMprContourSegments(mask, w, h){
+  const cached = mprSegCache.get(mask);
+  if(cached && cached.w === w && cached.h === h) return cached.segments;
+  const sdf = mprSignedDistanceField(mask, w, h);
+  const segments = mprMarchingSquares(sdf, w, h);
+  mprSegCache.set(mask, {w, h, segments});
+  return segments;
+}
+// Strokes a structure's contour as a smooth vector outline (screen-space,
+// so it stays crisp at any zoom) instead of the raster mask's blocky edge.
+function drawMprContourOutline(ctx, mask, w, h, color, sw, sh, pv){
+  const segments = getMprContourSegments(mask, w, h);
+  if(!segments.length) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for(const [p0, p1] of segments){
+    ctx.moveTo(p0[0] * sw * pv.scale + pv.tx, p0[1] * sh * pv.scale + pv.ty);
+    ctx.lineTo(p1[0] * sw * pv.scale + pv.tx, p1[1] * sh * pv.scale + pv.ty);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
 // Fills every empty Axial slice strictly between each pair of consecutive
 // drawn ("keyframe") slices of the active structure, by linearly blending
 // the two keyframes' signed distance fields and re-thresholding at 0.
@@ -2553,6 +2625,10 @@ function axialScreenToVoxel(sx, sy){
 }
 // Translucent fill + opaque outline for one structure's mask, at slice
 // resolution (matches rebuildCache's look, but width/height-parameterized).
+// Translucent interior fill only — the boundary itself is drawn separately
+// as a smooth vector outline (drawMprContourOutline) rather than raster
+// edge pixels, which is what keeps the contour crisp at any zoom level
+// instead of showing the underlying voxel grid.
 function mprMaskOverlayCanvas(mask, w, h, color){
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
@@ -2564,10 +2640,8 @@ function mprMaskOverlayCanvas(mask, w, h, color){
     for(let x = 0; x < w; x++){
       const i = y * w + x;
       if(!mask[i]) continue;
-      const edge = x === 0 || y === 0 || x === w - 1 || y === h - 1 ||
-                   !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w];
       const o = i * 4;
-      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = edge ? 255 : 80;
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 80;
     }
   }
   cx.putImageData(img, 0, 0);
@@ -2636,6 +2710,7 @@ function renderMprPane(plane){
     if(!mask) continue;
     const overlay = mprMaskOverlayCanvas(mask, slice.width, slice.height, s.color);
     ctx.drawImage(overlay, pv.tx, pv.ty, dw, dh);
+    drawMprContourOutline(ctx, mask, slice.width, slice.height, s.color, sw, sh, pv);
   }
   // Live pencil-path preview only applies to the Axial pane, where the point
   // coordinates in mprDrag.pts actually live.
@@ -2810,6 +2885,7 @@ function mprPaneInteraction(plane){
         const dia = mprBrushDiameterVoxels();
         const mask = getVolMask(s, z, true);
         mprStampDisc(mask, vx, vy, dia, val, dicomVolume.cols, dicomVolume.rows);
+        mprInvalidateSegCache(mask);
         mprDrag = {kind: 'stamp', z, lastX: vx, lastY: vy, val, dia};
       }
       renderMprPane('axial');
@@ -2862,6 +2938,7 @@ function mprPaneInteraction(plane){
       }else if(mprDrag.kind === 'stamp' && s){
         const mask = getVolMask(s, mprDrag.z, true);
         mprStampSegment(mask, mprDrag.lastX, mprDrag.lastY, vx, vy, mprDrag.dia, mprDrag.val, dicomVolume.cols, dicomVolume.rows);
+        mprInvalidateSegCache(mask);
         mprDrag.lastX = vx; mprDrag.lastY = vy;
       }
       renderMprPane('axial');
@@ -2881,6 +2958,7 @@ function mprPaneInteraction(plane){
         const mask = getVolMask(s, mprDrag.z, true);
         const region = mprPolygonRegion(mprDrag.pts, dicomVolume.cols, dicomVolume.rows);
         mprApplyRegion(mask, region, getRadio('pencil-mode') === 'add', dicomVolume.cols, dicomVolume.rows);
+        mprInvalidateSegCache(mask);
       }
       mprDrag = null;
       // the finished stroke may now show up as a cross-section on Coronal/Sagittal too
