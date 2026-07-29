@@ -746,8 +746,10 @@ function reorderStructure(from, to){
   refreshUI();
 }
 
-/* Rebuild a structure's cached rendering: translucent fill, opaque 1px outline.
-   A mask pixel is outline if any 4-neighbour is outside the mask. */
+/* Rebuild a structure's cached rendering: translucent fill only. The
+   boundary itself is drawn separately as a smooth vector outline (or, while
+   the structure is being actively edited, a cheap live raster outline) —
+   see drawMaskOutlineSmooth/drawMaskOutlineRaster in draw() below. */
 function rebuildCache(s){
   const cx = s.cache.getContext('2d');
   const img = cx.createImageData(W, H);
@@ -757,10 +759,8 @@ function rebuildCache(s){
     for(let x = 0; x < W; x++){
       const i = y * W + x;
       if(!m[i]) continue;
-      const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
-                   !m[i - 1] || !m[i + 1] || !m[i - W] || !m[i + W];
       const o = i * 4;
-      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = edge ? 255 : 80;
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 80;
     }
   }
   cx.clearRect(0, 0, W, H);
@@ -1590,6 +1590,10 @@ function exportPNG(){
     if(!s.visible) continue;
     if(s.dirty) rebuildCache(s);
     cx.drawImage(s.cache, 0, 0);
+  }
+  for(const s of structures){
+    if(!s.visible) continue;
+    drawMaskOutlineSmooth(cx, s.mask, W, H, s.color, 1);
   }
   c.toBlob(blob => { if(blob) downloadBlob(blob, 'contours.png'); });
 }
@@ -2725,11 +2729,47 @@ const mprSegCache = new WeakMap();
 function mprInvalidateSegCache(mask){
   if(mask) mprSegCache.delete(mask);
 }
+// Tight [x0,y0,x1,y1] bounding box around the mask's foreground pixels, with
+// `margin` extra pixels on each side (the SDF/marching-squares need a
+// little slack around the actual shape). Null if the mask is empty.
+function maskBoundingBox(mask, w, h, margin){
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for(let y = 0; y < h; y++){
+    const rowBase = y * w;
+    for(let x = 0; x < w; x++){
+      if(!mask[rowBase + x]) continue;
+      if(x < x0) x0 = x;
+      if(x > x1) x1 = x;
+      if(y < y0) y0 = y;
+      if(y > y1) y1 = y;
+    }
+  }
+  if(x1 < 0) return null;
+  return [Math.max(0, x0 - margin), Math.max(0, y0 - margin), Math.min(w - 1, x1 + margin), Math.min(h - 1, y1 + margin)];
+}
 function getMprContourSegments(mask, w, h){
   const cached = mprSegCache.get(mask);
   if(cached && cached.w === w && cached.h === h) return cached.segments;
-  const sdf = mprSignedDistanceField(mask, w, h);
-  const segments = mprMarchingSquares(sdf, w, h);
+  // Confine the (relatively expensive) SDF + marching squares to the mask's
+  // own bounding box rather than the full w×h canvas — for a structure that
+  // only occupies a fraction of a large mask (e.g. the 2D editor's 800×600),
+  // this is the difference between a barely-there recompute and a
+  // noticeable stutter right when a drag ends and the cache is invalidated.
+  const bbox = maskBoundingBox(mask, w, h, 2);
+  let segments;
+  if(!bbox){
+    segments = [];
+  }else{
+    const [x0, y0, x1, y1] = bbox;
+    const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+    const sub = new Uint8Array(bw * bh);
+    for(let y = y0; y <= y1; y++){
+      for(let x = x0; x <= x1; x++) sub[(y - y0) * bw + (x - x0)] = mask[y * w + x];
+    }
+    const sdf = mprSignedDistanceField(sub, bw, bh);
+    const rawSegments = mprMarchingSquares(sdf, bw, bh);
+    segments = rawSegments.map(([p0, p1]) => [[p0[0] + x0, p0[1] + y0], [p1[0] + x0, p1[1] + y0]]);
+  }
   mprSegCache.set(mask, {w, h, segments});
   return segments;
 }
@@ -3566,6 +3606,54 @@ function scheduleDraw(){
   drawQueued = true;
   requestAnimationFrame(() => { drawQueued = false; draw(); });
 }
+// Cheap per-pixel outline (a mask pixel is boundary if any 4-neighbour is
+// outside the mask) — used only while a structure's mask is being actively
+// painted every frame (Brush/Eraser stroke, Pencil boundary-grab warp),
+// since the smooth vector trace below is too expensive to recompute that
+// often. Blocky up close, but only shown transiently mid-drag.
+function drawMaskOutlineRaster(ctx, mask, w, h, color){
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cx2 = c.getContext('2d');
+  const img = cx2.createImageData(w, h);
+  const [r, g, b] = hexToRgb(color);
+  const d = img.data;
+  for(let y = 0; y < h; y++){
+    for(let x = 0; x < w; x++){
+      const i = y * w + x;
+      if(!mask[i]) continue;
+      const edge = x === 0 || y === 0 || x === w - 1 || y === h - 1 ||
+                   !mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w];
+      if(!edge) continue;
+      const o = i * 4;
+      d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+    }
+  }
+  cx2.putImageData(img, 0, 0);
+  ctx.drawImage(c, 0, 0);
+}
+// Smooth vector outline traced via signed-distance-field + marching squares
+// (same machinery as the 3D view's contour rendering — getMprContourSegments
+// is generic over any (mask,w,h), and its WeakMap cache is keyed by the mask
+// array itself, so this is cheap except right after that specific mask
+// actually changes). Crisp and anti-aliased at any zoom, unlike the raster
+// mask's native pixel grid.
+function drawMaskOutlineSmooth(ctx, mask, w, h, color, scale){
+  const segments = getMprContourSegments(mask, w, h);
+  if(!segments.length) return;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5 / scale;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  for(const [p0, p1] of segments){
+    ctx.moveTo(p0[0], p0[1]);
+    ctx.lineTo(p1[0], p1[1]);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
 function draw(){
   const [cw, ch] = cssSize();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -3587,6 +3675,15 @@ function draw(){
     if(!s.visible) continue;
     if(s.dirty) rebuildCache(s);
     ctx.drawImage(s.cache, 0, 0);
+  }
+  // Boundary being actively repainted every frame (Brush/Eraser stroke,
+  // Pencil grab-warp) gets the cheap raster outline; everything else gets
+  // the smooth vector trace.
+  const liveMaskDrag = drag && (drag.kind === 'stroke' || drag.kind === 'warp') ? active() : null;
+  for(const s of structures){
+    if(!s.visible) continue;
+    if(s === liveMaskDrag) drawMaskOutlineRaster(ctx, s.mask, W, H, s.color);
+    else drawMaskOutlineSmooth(ctx, s.mask, W, H, s.color, view.scale);
   }
   if(tool === 'extend' && extPreview) ctx.drawImage(extPreview.cache, 0, 0);
   if(tool === 'crop' && cropPreview) ctx.drawImage(cropPreview.cache, 0, 0);
@@ -3959,6 +4056,7 @@ cv.addEventListener('pointerdown', e => {
       // Click-drag on the existing boundary: warp that patch of the mask to
       // follow the cursor (a real "grab and pull the line"), not a stamp.
       pushUndo();
+      mprInvalidateSegCache(s.mask);
       drag = {kind: 'warp', lastX: mx, lastY: my, radius: grabR};
     }else{
       const d = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
@@ -3972,6 +4070,7 @@ cv.addEventListener('pointerdown', e => {
       else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
       if(val !== null){
         pushUndo();
+        mprInvalidateSegCache(s.mask);
         stampDisc(s.mask, mx, my, d, val);
         s.dirty = true;
         drag = {kind: 'stroke', last: [mx, my], d, val};
@@ -4042,6 +4141,7 @@ cv.addEventListener('pointerup', e => {
   if(d.kind === 'pencil' && s && d.pts.length >= 3){
     pushUndo();
     applyRegion(s.mask, polygonRegion(d.pts), getRadio('pencil-mode') === 'add');
+    mprInvalidateSegCache(s.mask);
     s.dirty = true;
   }else if(d.kind === 'croprect' && s){
     pushUndo();
@@ -4061,6 +4161,7 @@ cv.addEventListener('pointerup', e => {
     const sides = +$('shape-sides').value;
     const region = shapeRegion(kind, d.p0[0], d.p0[1], d.p1[0], d.p1[1], sides);
     applyRegion(s.mask, region, getRadio('shape-mode') === 'add');
+    mprInvalidateSegCache(s.mask);
     s.dirty = true;
   }
   refreshToolPreviews();
