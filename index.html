@@ -231,7 +231,9 @@
       <label><input type="radio" name="pencil-mode" value="subtract"> Subtract from structure</label>
       <div class="grouplbl">Line selection range: <b id="pencil-grab-d-lbl">24</b> px</div>
       <input type="range" id="pencil-grab-d" min="4" max="150" step="2" value="24">
-      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting near the existing contour (highlighted on hover, within the range above) instead grabs that stretch of the line and pulls it to follow the cursor. Hold Shift to temporarily erase (Brush's diameter).</div>
+      <div class="grouplbl">Stiffness: <b id="pencil-stiff-lbl">30</b>%</div>
+      <input type="range" id="pencil-stiff" min="0" max="100" step="5" value="30">
+      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting near the existing contour (highlighted on hover, within the range above) instead grabs that stretch of the line and pulls it to follow the cursor. Stiffness smooths out the pulled stretch as you drag — higher resists sharp kinks, 0 follows the cursor exactly. Hold Shift to temporarily erase (Brush's diameter).</div>
     </div>
 
     <div class="panel" id="set-shape">
@@ -960,7 +962,12 @@ function collectNearBoundaryPixels(mask, w, h, cx, cy, radius){
 // Reads/writes the same live array: takes a small snapshot of just the
 // affected box first (source positions outside that box are safe to read
 // live, since this call never writes there).
-function applyMaskWarpStep(mask, w, h, cx, cy, stepDx, stepDy, radius){
+// `stiffness` (0..1) runs a majority-filter smoothing pass over the same
+// affected box right after the warp, resisting the single-pixel kinks a
+// raster nearest-neighbor resample otherwise leaves behind — 0 skips it
+// (line follows the cursor exactly, roughest result), higher values smooth
+// more (line resists sharp bends, lags the cursor's fine detail slightly).
+function applyMaskWarpStep(mask, w, h, cx, cy, stepDx, stepDy, radius, stiffness){
   if(radius <= 0 || (stepDx === 0 && stepDy === 0)) return;
   const x0 = Math.max(0, Math.floor(cx - radius)), x1 = Math.min(w - 1, Math.ceil(cx + radius));
   const y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(h - 1, Math.ceil(cy + radius));
@@ -982,6 +989,38 @@ function applyMaskWarpStep(mask, w, h, cx, cy, stepDx, stepDy, radius){
       if(sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) val = localSnap[(sy - y0) * bw + (sx - x0)];
       else if(sx >= 0 && sx < w && sy >= 0 && sy < h) val = mask[sy * w + sx];
       mask[y * w + x] = val;
+    }
+  }
+  if(stiffness > 0) smoothMaskBox(mask, w, h, x0, y0, x1, y1, cx, cy, radius, stiffness);
+}
+// Binary majority-filter (box-average + re-threshold) smoothing, confined to
+// the same disc just warped. Reads a fresh local snapshot so the filter
+// isn't fed its own partially-smoothed output mid-pass.
+function smoothMaskBox(mask, w, h, x0, y0, x1, y1, cx, cy, radius, stiffness){
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  const snap = new Uint8Array(bw * bh);
+  for(let y = y0; y <= y1; y++){
+    for(let x = x0; x <= x1; x++) snap[(y - y0) * bw + (x - x0)] = mask[y * w + x];
+  }
+  const read = (x, y) => {
+    const cxp = Math.max(0, Math.min(w - 1, x)), cyp = Math.max(0, Math.min(h - 1, y));
+    if(cxp >= x0 && cxp <= x1 && cyp >= y0 && cyp <= y1) return snap[(cyp - y0) * bw + (cxp - x0)];
+    return mask[cyp * w + cxp];
+  };
+  const kernelR = Math.max(1, Math.round(stiffness * 3));
+  const kernelR2 = kernelR * kernelR;
+  for(let y = y0; y <= y1; y++){
+    for(let x = x0; x <= x1; x++){
+      const ddx = x - cx, ddy = y - cy;
+      if(ddx * ddx + ddy * ddy > radius * radius) continue;
+      let sum = 0, cnt = 0;
+      for(let ky = -kernelR; ky <= kernelR; ky++){
+        for(let kx = -kernelR; kx <= kernelR; kx++){
+          if(kx * kx + ky * ky > kernelR2) continue;
+          sum += read(x + kx, y + ky); cnt++;
+        }
+      }
+      mask[y * w + x] = (sum / cnt >= 0.5) ? 1 : 0;
     }
   }
 }
@@ -3132,7 +3171,7 @@ function mprPaneInteraction(plane){
         mprDrag.lastX = vx; mprDrag.lastY = vy;
       }else if(mprDrag.kind === 'warp' && s){
         const mask = getVolMask(s, mprDrag.z, true);
-        applyMaskWarpStep(mask, dicomVolume.cols, dicomVolume.rows, vx, vy, vx - mprDrag.lastX, vy - mprDrag.lastY, mprDrag.radius);
+        applyMaskWarpStep(mask, dicomVolume.cols, dicomVolume.rows, vx, vy, vx - mprDrag.lastX, vy - mprDrag.lastY, mprDrag.radius, +$('pencil-stiff').value / 100);
         mprInvalidateSegCache(mask);
         mprDrag.lastX = vx; mprDrag.lastY = vy;
       }
@@ -3973,7 +4012,7 @@ cv.addEventListener('pointermove', e => {
     }else if(drag.kind === 'warp'){
       const s = active();
       if(s){
-        applyMaskWarpStep(s.mask, W, H, mx, my, mx - drag.lastX, my - drag.lastY, drag.radius);
+        applyMaskWarpStep(s.mask, W, H, mx, my, mx - drag.lastX, my - drag.lastY, drag.radius, +$('pencil-stiff').value / 100);
         s.dirty = true;
       }
       drag.lastX = mx; drag.lastY = my;
@@ -4088,6 +4127,9 @@ $('pencil-grab-d').addEventListener('input', () => {
   $('pencil-grab-d-lbl').textContent = $('pencil-grab-d').value;
   scheduleDraw();
   if(mprMode && dicomVolume) renderAllMprPanes();
+});
+$('pencil-stiff').addEventListener('input', () => {
+  $('pencil-stiff-lbl').textContent = $('pencil-stiff').value;
 });
 $('shape-sides').addEventListener('input', () => {
   $('shape-sides-lbl').textContent = $('shape-sides').value; scheduleDraw();
