@@ -287,7 +287,13 @@
         <button class="apply" id="crop-apply">Apply</button>
       </div>
 
-      <div class="hint">Rectangle/Freehand: drag on canvas, release to crop. Another structure: build a chain of reference structures (distance + keep/remove), then Apply — preview shown in yellow.</div>
+      <div class="grouplbl">Output</div>
+      <label><input type="radio" name="crop-out" value="existing" checked> Save to existing structure</label>
+      <select id="crop-out-existing"></select>
+      <label><input type="radio" name="crop-out" value="new"> Save to new structure</label>
+      <input type="text" id="crop-out-name" placeholder="New structure name" style="display:none">
+
+      <div class="hint">Rectangle/Freehand: drag on canvas, release to crop. Another structure: build a chain of reference structures (distance + keep/remove), then Apply — preview shown in yellow. Output defaults to the selected structure; pick a different existing one or save to a new structure instead.</div>
     </div>
 
     <div class="panel" id="set-boolean">
@@ -1270,6 +1276,7 @@ function applyExtend(){
 // the reference structure by its distance, then keep-inside or remove-inside it.
 let cropSteps = [];        // [{refIdx, marginVal, marginUnit, mode}]
 let cropStepsTouched = false;
+let cropOutTouched = false;   // true once the user has manually picked an output structure
 function computeCropChain(baseMask, steps){
   let mask = new Uint8Array(baseMask);
   for(const step of steps){
@@ -1370,6 +1377,23 @@ function renderCropPanel(){
   });
   updateCropExpr();
   $('crop-apply').disabled = !active() || !cropSteps.length;
+
+  const outSel = $('crop-out-existing');
+  const prevOut = outSel.value;
+  outSel.innerHTML = '';
+  structures.forEach((s, i) => {
+    const o = document.createElement('option');
+    o.value = i; o.textContent = s.name;
+    outSel.appendChild(o);
+  });
+  if(!cropOutTouched){
+    // Tracks the selected structure until the user explicitly picks a
+    // different output target — "selected structure" by default, or
+    // "the chosen one" once they change it.
+    if([...outSel.options].some(o => +o.value === activeIdx)) outSel.value = activeIdx;
+  }else if([...outSel.options].some(o => o.value === prevOut)){
+    outSel.value = prevOut;
+  }
 }
 function updateCropExpr(){
   $('crop-expr').textContent = cropExprString();
@@ -1408,10 +1432,26 @@ function applyCropFromStructure(){
   const s = active();
   if(!s || !cropPreview) return;
   pushUndo();
-  s.mask = cropPreview.mask;
-  s.dirty = true;
+  applyCropResult(cropPreview.mask);
   refreshToolPreviews();
   refreshUI();
+}
+// Writes a finished crop's result mask to wherever the Output option says:
+// the picked existing structure (defaults to whichever was selected when
+// the Crop tool was opened), or a newly created one.
+function applyCropResult(mask){
+  if(getRadio('crop-out') === 'new'){
+    const name = $('crop-out-name').value.trim() || 'Cropped';
+    const s = makeStructure(name, PALETTE[structures.length % PALETTE.length]);
+    s.mask = mask;
+    structures.push(s);
+    activeIdx = structures.length - 1;
+  }else{
+    const outIdx = +$('crop-out-existing').value;
+    structures[outIdx].mask = mask;
+    structures[outIdx].dirty = true;
+    activeIdx = outIdx;
+  }
 }
 
 /* ============================ translate ============================ */
@@ -3967,12 +4007,14 @@ cv.addEventListener('pointerup', e => {
   }else if(d.kind === 'croprect' && s){
     pushUndo();
     const region = rectRegion(d.p0[0], d.p0[1], d.p1[0], d.p1[1]);
-    cropWithRegion(s.mask, region);
-    s.dirty = true;
+    const result = new Uint8Array(s.mask);
+    cropWithRegion(result, region);
+    applyCropResult(result);
   }else if(d.kind === 'cropfree' && s && d.pts.length >= 3){
     pushUndo();
-    cropWithRegion(s.mask, polygonRegion(d.pts));
-    s.dirty = true;
+    const result = new Uint8Array(s.mask);
+    cropWithRegion(result, polygonRegion(d.pts));
+    applyCropResult(result);
   }else if(d.kind === 'shape' && s &&
            Math.abs(d.p1[0] - d.p0[0]) >= 1 && Math.abs(d.p1[1] - d.p0[1]) >= 1){
     pushUndo();
@@ -3983,7 +4025,7 @@ cv.addEventListener('pointerup', e => {
     s.dirty = true;
   }
   refreshToolPreviews();
-  scheduleDraw();
+  refreshUI();
 });
 // keep: mask &= region;  remove: mask &= ~region
 function cropWithRegion(mask, region){
@@ -4071,6 +4113,13 @@ $('crop-add-step').addEventListener('click', () => {
   renderCropPanel();
 });
 $('crop-apply').addEventListener('click', applyCropFromStructure);
+document.querySelectorAll('input[name="crop-out"]').forEach(r =>
+  r.addEventListener('change', () => {
+    const isNew = getRadio('crop-out') === 'new';
+    $('crop-out-existing').style.display = isNew ? 'none' : 'block';
+    $('crop-out-name').style.display = isNew ? 'block' : 'none';
+  }));
+$('crop-out-existing').addEventListener('change', () => { cropOutTouched = true; });
 $('trans-dx').addEventListener('input', refreshToolPreviews);
 $('trans-dy').addEventListener('input', refreshToolPreviews);
 $('trans-unit').addEventListener('change', refreshToolPreviews);
