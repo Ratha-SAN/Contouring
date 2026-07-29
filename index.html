@@ -2574,12 +2574,15 @@ function mprMaskOverlayCanvas(mask, w, h, color){
   return c;
 }
 // Small fixed (non-panning/zooming) X/Y/Z axis indicator in a pane's
-// bottom-left corner, showing which screen direction each DICOM volume axis
-// runs in (arrows point in the direction of increasing voxel index).
+// bottom-left corner: a conventional bottom-left origin, the horizontal
+// (h) axis running right along the bottom and the vertical (v) axis
+// rising up from that same point.
 function drawMprAxisIndicator(ctx, plane, ch){
   const [h, v] = MPR_AXIS_LETTERS[plane];
   const len = 16;
-  const ox = 24, oy = Math.max(24, ch - 37);
+  // Origin sits at the bottom of the vertical arm: the horizontal (h) arm
+  // runs right from there, and the vertical (v) arm rises up from it.
+  const ox = 24, oy = Math.max(len + 24, ch - 24);
   ctx.save();
   ctx.lineWidth = 2;
   ctx.font = 'bold 11px sans-serif';
@@ -2591,9 +2594,9 @@ function drawMprAxisIndicator(ctx, plane, ch){
   ctx.fillText(h, ox + len + 3, oy);
   ctx.strokeStyle = MPR_AXIS_COLOR[v];
   ctx.fillStyle = MPR_AXIS_COLOR[v];
-  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox, oy + len); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox, oy - len); ctx.stroke();
   ctx.textAlign = 'center';
-  ctx.fillText(v, ox, oy + len + 10);
+  ctx.fillText(v, ox, oy - len - 10);
   ctx.beginPath(); ctx.fillStyle = '#ccc'; ctx.arc(ox, oy, 2, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
