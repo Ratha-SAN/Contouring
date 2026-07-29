@@ -229,7 +229,7 @@
       <div class="grouplbl">Mode</div>
       <label><input type="radio" name="pencil-mode" value="add" checked> Add to structure</label>
       <label><input type="radio" name="pencil-mode" value="subtract"> Subtract from structure</label>
-      <div class="hint">Drag a freehand path; it closes and fills on release.</div>
+      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting on the existing contour instead grabs and locally reshapes that stretch of the line. Hold Shift to temporarily erase (Brush's diameter).</div>
     </div>
 
     <div class="panel" id="set-shape">
@@ -255,6 +255,7 @@
       <div class="grouplbl">Mode</div>
       <label><input type="radio" name="brush-mode" value="paint" checked> Paint</label>
       <label><input type="radio" name="brush-mode" value="erase"> Erase</label>
+      <div class="hint">Hold Shift to temporarily erase regardless of Mode.</div>
     </div>
 
     <div class="panel" id="set-eraser">
@@ -555,6 +556,7 @@ const undoStack = [], redoStack = [];
 // transient interaction state
 let drag = null;                 // current pointer drag descriptor
 let spaceDown = false;
+let shiftDown = false;   // Pencil/Brush temporarily erase (Brush's own diameter) while held
 let cursorPos = null;            // last pointer pos in mask coords (float)
 let extPreview = null;           // {mask, cache} live Extend preview
 let cropPreview = null;          // {region, cache} live Crop-to-structure preview
@@ -888,6 +890,35 @@ function stampSegment(mask, x0, y0, x1, y1, diameter, val){
     const t = i / steps;
     stampDisc(mask, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, diameter, val);
   }
+}
+// True where (x,y) sits on the mask's boundary (inside/outside differ from
+// at least one 4-neighbour). Shared, w/h-parameterized so it works for both
+// the fixed-W/H 2D mask and any MPR volume-plane mask.
+function isMaskEdgePixel(mask, w, h, x, y){
+  const i = y * w + x;
+  const inside = !!mask[i];
+  if(x > 0 && !!mask[i - 1] !== inside) return true;
+  if(x < w - 1 && !!mask[i + 1] !== inside) return true;
+  if(y > 0 && !!mask[i - w] !== inside) return true;
+  if(y < h - 1 && !!mask[i + w] !== inside) return true;
+  return false;
+}
+// Whether any boundary pixel of `mask` lies within `radius` of (cx,cy) — used
+// by the Pencil tool to decide whether a click grabs the existing contour
+// (to locally reshape it) instead of starting a brand-new freehand shape.
+function nearMaskBoundary(mask, w, h, cx, cy, radius){
+  if(!mask || radius <= 0) return false;
+  const x0 = Math.max(0, Math.floor(cx - radius)), x1 = Math.min(w - 1, Math.ceil(cx + radius));
+  const y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(h - 1, Math.ceil(cy + radius));
+  const r2 = radius * radius;
+  for(let y = y0; y <= y1; y++){
+    for(let x = x0; x <= x1; x++){
+      const dx = x - cx, dy = y - cy;
+      if(dx * dx + dy * dy > r2) continue;
+      if(isMaskEdgePixel(mask, w, h, x, y)) return true;
+    }
+  }
+  return false;
 }
 
 /* --- exact Euclidean distance transform (Felzenszwalb & Huttenlocher) ---
@@ -2890,15 +2921,29 @@ function mprPaneInteraction(plane){
       const z = mprView.axial.index;
       const s = structures[activeIdx];
       pushUndo();
-      if(tool === 'pencil'){
-        mprDrag = {kind: 'pencil', z, pts: [[vx, vy]]};
-      }else{
-        const val = (tool === 'brush' && getRadio('brush-mode') === 'paint') ? 1 : 0;
-        const dia = mprBrushDiameterVoxels();
+      const dia = mprBrushDiameterVoxels();
+      const cols = dicomVolume.cols, rows = dicomVolume.rows;
+      const existingMask = s.volMasks ? s.volMasks[z] : null;
+      // Same stamp-value logic as the 2D canvas: Eraser always erases,
+      // Shift temporarily erases over Pencil/Brush, Brush follows its
+      // Paint/Erase mode, and Pencil clicked near its own existing contour
+      // "grabs" the line so the drag locally reshapes that stretch.
+      let val = null;
+      if(tool === 'eraser') val = 0;
+      else if(shiftDown) val = 0;
+      else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
+      else if(existingMask && nearMaskBoundary(existingMask, cols, rows, vx, vy, dia / 2)){
+        const ix = Math.max(0, Math.min(cols - 1, Math.round(vx)));
+        const iy = Math.max(0, Math.min(rows - 1, Math.round(vy)));
+        val = existingMask[iy * cols + ix] ? 1 : 0;
+      }
+      if(val !== null){
         const mask = getVolMask(s, z, true);
-        mprStampDisc(mask, vx, vy, dia, val, dicomVolume.cols, dicomVolume.rows);
+        mprStampDisc(mask, vx, vy, dia, val, cols, rows);
         mprInvalidateSegCache(mask);
         mprDrag = {kind: 'stamp', z, lastX: vx, lastY: vy, val, dia};
+      }else{
+        mprDrag = {kind: 'pencil', z, pts: [[vx, vy]]};
       }
       renderMprPane('axial');
       return;
@@ -3419,13 +3464,15 @@ function draw(){
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  // brush / eraser cursor circle
-  if(cursorPos && (tool === 'brush' || tool === 'eraser') && !spaceDown){
-    const d = tool === 'brush' ? +$('brush-d').value : +$('eraser-d').value;
+  // brush / eraser cursor circle (also shown for Shift's temporary-erase
+  // modifier over Pencil/Brush, tinted red to flag that it's erasing)
+  const shiftErase = shiftDown && (tool === 'pencil' || tool === 'brush');
+  if(cursorPos && !spaceDown && (tool === 'brush' || tool === 'eraser' || shiftErase)){
+    const d = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
     const [sx, sy] = toScr(cursorPos);
     ctx.beginPath();
     ctx.arc(sx, sy, (d / 2) * view.scale, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.strokeStyle = shiftErase ? 'rgba(255,120,120,0.85)' : 'rgba(255,255,255,0.7)';
     ctx.lineWidth = 1;
     ctx.stroke();
   }
@@ -3698,15 +3745,31 @@ cv.addEventListener('pointerdown', e => {
   const s = active();
   if(!s) return;
 
-  if(tool === 'pencil'){
-    drag = {kind: 'pencil', pts: [[mx, my]]};
-  }else if(tool === 'brush' || tool === 'eraser'){
-    const d = tool === 'brush' ? +$('brush-d').value : +$('eraser-d').value;
-    const val = (tool === 'brush' && getRadio('brush-mode') === 'paint') ? 1 : 0;
-    pushUndo();
-    stampDisc(s.mask, mx, my, d, val);
-    s.dirty = true;
-    drag = {kind: 'stroke', last: [mx, my], d, val};
+  if(tool === 'pencil' || tool === 'brush' || tool === 'eraser'){
+    const d = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
+    // Which stamp value to paint with, or null to fall back to Pencil's
+    // normal freehand-polygon draw: Eraser always erases; Shift temporarily
+    // erases over Pencil/Brush; Brush follows its Paint/Erase mode; and
+    // Pencil clicked near its own existing boundary "grabs" the line —
+    // painting or erasing depending on which side of the boundary the click
+    // landed on, so the drag locally reshapes that stretch of contour.
+    let val = null;
+    if(tool === 'eraser') val = 0;
+    else if(shiftDown) val = 0;
+    else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
+    else if(nearMaskBoundary(s.mask, W, H, mx, my, d / 2)){
+      const ix = Math.max(0, Math.min(W - 1, Math.round(mx)));
+      const iy = Math.max(0, Math.min(H - 1, Math.round(my)));
+      val = s.mask[iy * W + ix] ? 1 : 0;
+    }
+    if(val !== null){
+      pushUndo();
+      stampDisc(s.mask, mx, my, d, val);
+      s.dirty = true;
+      drag = {kind: 'stroke', last: [mx, my], d, val};
+    }else{
+      drag = {kind: 'pencil', pts: [[mx, my]]};
+    }
   }else if(tool === 'crop'){
     const cshape = getRadio('crop-shape');
     if(cshape === 'rect') drag = {kind: 'croprect', p0: [mx, my], p1: [mx, my]};
@@ -3817,6 +3880,7 @@ cv.addEventListener('wheel', e => {
 
 /* ============================ keyboard ============================ */
 window.addEventListener('keydown', e => {
+  if(e.key === 'Shift' && !shiftDown){ shiftDown = true; scheduleDraw(); if(mprMode) renderAllMprPanes(); }
   if(e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if(e.code === 'Space'){ spaceDown = true; cv.style.cursor = 'grab'; e.preventDefault(); }
   const mod = e.ctrlKey || e.metaKey;
@@ -3827,8 +3891,12 @@ window.addEventListener('keydown', e => {
   else if(mod && e.key.toLowerCase() === 'v'){ pasteStructure(); e.preventDefault(); }
 });
 window.addEventListener('keyup', e => {
+  if(e.key === 'Shift'){ shiftDown = false; scheduleDraw(); if(mprMode) renderAllMprPanes(); }
   if(e.code === 'Space'){ spaceDown = false; cv.style.cursor = 'crosshair'; }
 });
+// Shift released outside the window (e.g. alt-tabbing away mid-stroke)
+// wouldn't fire keyup, so also drop it the moment focus leaves.
+window.addEventListener('blur', () => { if(shiftDown){ shiftDown = false; scheduleDraw(); if(mprMode) renderAllMprPanes(); } });
 
 /* ============================ settings wiring ============================ */
 $('brush-d').addEventListener('input', () => {
