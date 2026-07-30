@@ -864,11 +864,18 @@ function movingAverageSmooth(pts, radius, closed){
 // Full freehand-stroke smoothing: a wobble-dampening moving average (window
 // scales with the stroke's point count, so a long meandering stroke and a
 // short quick one both get proportionate smoothing) followed by Chaikin
-// corner-rounding for the final curve feel.
+// corner-rounding for the final curve feel. No forced minimum window: for a
+// short stroke (few points recorded so far — including live, mid-drag,
+// preview) even a radius-2 window can span most of the point list, blending
+// the start/end into their neighbors and collapsing the visible path down
+// to a sliver near the middle. Chaikin alone (open mode keeps the first/
+// last points fixed) is enough curve quality until there are actually
+// enough points for a window to mean something.
 function smoothFreehandPath(pts, closed){
   if(pts.length < 3) return pts;
-  const radius = Math.max(2, Math.round(pts.length * 0.08));
-  return chaikinSmooth(movingAverageSmooth(pts, radius, closed), 3, closed);
+  const radius = Math.round(pts.length * 0.08);
+  const filtered = radius >= 1 ? movingAverageSmooth(pts, radius, closed) : pts;
+  return chaikinSmooth(filtered, 3, closed);
 }
 /* Freehand polygon -> region mask. The polygon is filled on an offscreen
    canvas and thresholded at 50% alpha to binarize the antialiased edge. */
