@@ -819,6 +819,59 @@ function refreshHistBtns(){
 }
 
 /* ============================ mask math ============================ */
+// Chaikin corner-cutting: replaces each edge with two points at 1/4 and 3/4
+// along it, repeated `iterations` times — converges to a smooth curve
+// through the original points' general path, rounding out the jitter of a
+// hand-drawn line without needing a full spline fit. `closed` treats the
+// point list as a loop (used for the final filled shape, which always
+// closes back to its start); otherwise the first/last points stay fixed
+// (used for the live in-progress stroke preview).
+function chaikinSmooth(pts, iterations, closed){
+  if(pts.length < 3) return pts;
+  let cur = pts;
+  for(let iter = 0; iter < iterations; iter++){
+    const n = cur.length;
+    const next = closed ? [] : [cur[0]];
+    const segCount = closed ? n : n - 1;
+    for(let i = 0; i < segCount; i++){
+      const [x0, y0] = cur[i], [x1, y1] = cur[(i + 1) % n];
+      next.push([x0 + 0.25 * (x1 - x0), y0 + 0.25 * (y1 - y0)]);
+      next.push([x0 + 0.75 * (x1 - x0), y0 + 0.75 * (y1 - y0)]);
+    }
+    if(!closed) next.push(cur[n - 1]);
+    cur = next;
+  }
+  return cur;
+}
+// Averages each point with its neighbors within `radius` points either
+// side — a genuine low-pass filter that dampens hand-tremor-scale wobble,
+// unlike Chaikin alone (which rounds corners but preserves however many
+// of them the input has). `closed` wraps the window across the seam.
+function movingAverageSmooth(pts, radius, closed){
+  const n = pts.length;
+  if(n < 3 || radius < 1) return pts;
+  const out = new Array(n);
+  for(let i = 0; i < n; i++){
+    let sx = 0, sy = 0, cnt = 0;
+    for(let k = -radius; k <= radius; k++){
+      let j = i + k;
+      if(closed) j = ((j % n) + n) % n;
+      else if(j < 0 || j >= n) continue;
+      sx += pts[j][0]; sy += pts[j][1]; cnt++;
+    }
+    out[i] = [sx / cnt, sy / cnt];
+  }
+  return out;
+}
+// Full freehand-stroke smoothing: a wobble-dampening moving average (window
+// scales with the stroke's point count, so a long meandering stroke and a
+// short quick one both get proportionate smoothing) followed by Chaikin
+// corner-rounding for the final curve feel.
+function smoothFreehandPath(pts, closed){
+  if(pts.length < 3) return pts;
+  const radius = Math.max(2, Math.round(pts.length * 0.08));
+  return chaikinSmooth(movingAverageSmooth(pts, radius, closed), 3, closed);
+}
 /* Freehand polygon -> region mask. The polygon is filled on an offscreen
    canvas and thresholded at 50% alpha to binarize the antialiased edge. */
 function polygonRegion(pts){
@@ -2968,11 +3021,12 @@ function renderMprPane(plane){
   // coordinates in mprDrag.pts actually live.
   if(plane === 'axial' && mprDrag && mprDrag.kind === 'pencil' && mprDrag.pts.length > 1){
     const toScr = p => [p[0] * sw * pv.scale + pv.tx, p[1] * sh * pv.scale + pv.ty];
+    const previewPts = smoothFreehandPath(mprDrag.pts, false);
     ctx.beginPath();
-    const p0 = toScr(mprDrag.pts[0]);
+    const p0 = toScr(previewPts[0]);
     ctx.moveTo(p0[0], p0[1]);
-    for(let i = 1; i < mprDrag.pts.length; i++){
-      const p = toScr(mprDrag.pts[i]);
+    for(let i = 1; i < previewPts.length; i++){
+      const p = toScr(previewPts[i]);
       ctx.lineTo(p[0], p[1]);
     }
     ctx.closePath();
@@ -3240,7 +3294,7 @@ function mprPaneInteraction(plane){
       if(mprDrag.kind === 'pencil' && mprDrag.pts.length > 2 && activeIdx >= 0){
         const s = structures[activeIdx];
         const mask = getVolMask(s, mprDrag.z, true);
-        const region = mprPolygonRegion(mprDrag.pts, dicomVolume.cols, dicomVolume.rows);
+        const region = mprPolygonRegion(smoothFreehandPath(mprDrag.pts, true), dicomVolume.cols, dicomVolume.rows);
         mprApplyRegion(mask, region, getRadio('pencil-mode') === 'add', dicomVolume.cols, dicomVolume.rows);
         mprInvalidateSegCache(mask);
       }
@@ -3694,11 +3748,12 @@ function draw(){
   const toScr = p => [p[0] * view.scale + view.tx, p[1] * view.scale + view.ty];
 
   if(drag && (drag.kind === 'pencil' || drag.kind === 'cropfree') && drag.pts.length > 1){
+    const previewPts = drag.kind === 'pencil' ? smoothFreehandPath(drag.pts, false) : drag.pts;
     ctx.beginPath();
-    const p0 = toScr(drag.pts[0]);
+    const p0 = toScr(previewPts[0]);
     ctx.moveTo(p0[0], p0[1]);
-    for(let i = 1; i < drag.pts.length; i++){
-      const p = toScr(drag.pts[i]);
+    for(let i = 1; i < previewPts.length; i++){
+      const p = toScr(previewPts[i]);
       ctx.lineTo(p[0], p[1]);
     }
     ctx.closePath();
@@ -4140,7 +4195,7 @@ cv.addEventListener('pointerup', e => {
 
   if(d.kind === 'pencil' && s && d.pts.length >= 3){
     pushUndo();
-    applyRegion(s.mask, polygonRegion(d.pts), getRadio('pencil-mode') === 'add');
+    applyRegion(s.mask, polygonRegion(smoothFreehandPath(d.pts, true)), getRadio('pencil-mode') === 'add');
     mprInvalidateSegCache(s.mask);
     s.dirty = true;
   }else if(d.kind === 'croprect' && s){
