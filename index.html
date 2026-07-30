@@ -231,9 +231,7 @@
       <label><input type="radio" name="pencil-mode" value="subtract"> Subtract from structure</label>
       <div class="grouplbl">Line selection range: <b id="pencil-grab-d-lbl">24</b> px</div>
       <input type="range" id="pencil-grab-d" min="4" max="150" step="2" value="24">
-      <div class="grouplbl">Stiffness: <b id="pencil-stiff-lbl">30</b>%</div>
-      <input type="range" id="pencil-stiff" min="0" max="100" step="5" value="30">
-      <div class="hint">Drag a freehand path; it closes and fills on release. Click-drag starting near the existing contour (highlighted on hover, within the range above) instead grabs that stretch of the line and pulls it to follow the cursor. Stiffness smooths out the pulled stretch as you drag — higher resists sharp kinks, 0 follows the cursor exactly. Hold Shift to temporarily erase (Brush's diameter).</div>
+      <div class="hint">Drag a freehand path away from any existing contour to draw a new shape (Add/Subtract), closing and filling on release. Start the drag on or near the existing contour instead (highlighted on hover, within the range above) to redraw that stretch of line, Eclipse-style: the loop your stroke traces, closed back to where you started, replaces whichever part of the old line it crosses — no separate mode needed, it works whichever direction you correct. Hold Shift to temporarily erase (Brush's diameter).</div>
     </div>
 
     <div class="panel" id="set-shape">
@@ -932,6 +930,16 @@ function applyRegion(mask, region, add){
     if(region[i]) mask[i] = add ? 1 : 0;
   }
 }
+// Toggles region into mask (mask ^= region) — used for the Pencil's
+// Eclipse-style redraw: the loop a correction stroke traces, closed back to
+// where it started on the existing contour, replaces whichever stretch of
+// line it crosses by flipping that loop's interior rather than only adding
+// or only removing.
+function xorRegion(mask, region){
+  for(let i = 0; i < W * H; i++){
+    if(region[i]) mask[i] ^= 1;
+  }
+}
 // Stamp a filled disc of given diameter centred at (cx,cy); val = 1 paint / 0 erase.
 function stampDisc(mask, cx, cy, diameter, val){
   const r = diameter / 2, r2 = r * r;
@@ -1002,82 +1010,6 @@ function collectNearBoundaryPixels(mask, w, h, cx, cy, radius){
   }
   return pts;
 }
-// Pushes `mask` a small step (stepDx,stepDy) — one animation frame's worth
-// of pointer movement — within `radius` of the current pointer (cx,cy),
-// like a Liquify "Forward Warp" brush: each output pixel samples back along
-// the step, scaled by a smoothstep falloff (full displacement at the
-// pointer, none at the radius edge). Called every pointermove with that
-// frame's own small delta (not the drag's total delta), so many calls
-// accumulate into a continuous pull that tracks the whole path the cursor
-// takes — a single call bridging a large distance would under-reach for
-// points away from dead centre, same as a real brush needs enough strokes
-// to cover ground.
-// Reads/writes the same live array: takes a small snapshot of just the
-// affected box first (source positions outside that box are safe to read
-// live, since this call never writes there).
-// `stiffness` (0..1) runs a majority-filter smoothing pass over the same
-// affected box right after the warp, resisting the single-pixel kinks a
-// raster nearest-neighbor resample otherwise leaves behind — 0 skips it
-// (line follows the cursor exactly, roughest result), higher values smooth
-// more (line resists sharp bends, lags the cursor's fine detail slightly).
-function applyMaskWarpStep(mask, w, h, cx, cy, stepDx, stepDy, radius, stiffness){
-  if(radius <= 0 || (stepDx === 0 && stepDy === 0)) return;
-  const x0 = Math.max(0, Math.floor(cx - radius)), x1 = Math.min(w - 1, Math.ceil(cx + radius));
-  const y0 = Math.max(0, Math.floor(cy - radius)), y1 = Math.min(h - 1, Math.ceil(cy + radius));
-  if(x1 < x0 || y1 < y0) return;
-  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
-  const localSnap = new Uint8Array(bw * bh);
-  for(let y = y0; y <= y1; y++){
-    for(let x = x0; x <= x1; x++) localSnap[(y - y0) * bw + (x - x0)] = mask[y * w + x];
-  }
-  for(let y = y0; y <= y1; y++){
-    for(let x = x0; x <= x1; x++){
-      const ddx = x - cx, ddy = y - cy;
-      const dist = Math.sqrt(ddx * ddx + ddy * ddy);
-      if(dist > radius) continue;
-      const t = dist / radius;
-      const wgt = 1 - (3 * t * t - 2 * t * t * t);   // smoothstep ease: 1 at pointer, 0 at edge
-      const sx = Math.round(x - wgt * stepDx), sy = Math.round(y - wgt * stepDy);
-      let val = 0;
-      if(sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) val = localSnap[(sy - y0) * bw + (sx - x0)];
-      else if(sx >= 0 && sx < w && sy >= 0 && sy < h) val = mask[sy * w + sx];
-      mask[y * w + x] = val;
-    }
-  }
-  if(stiffness > 0) smoothMaskBox(mask, w, h, x0, y0, x1, y1, cx, cy, radius, stiffness);
-}
-// Binary majority-filter (box-average + re-threshold) smoothing, confined to
-// the same disc just warped. Reads a fresh local snapshot so the filter
-// isn't fed its own partially-smoothed output mid-pass.
-function smoothMaskBox(mask, w, h, x0, y0, x1, y1, cx, cy, radius, stiffness){
-  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
-  const snap = new Uint8Array(bw * bh);
-  for(let y = y0; y <= y1; y++){
-    for(let x = x0; x <= x1; x++) snap[(y - y0) * bw + (x - x0)] = mask[y * w + x];
-  }
-  const read = (x, y) => {
-    const cxp = Math.max(0, Math.min(w - 1, x)), cyp = Math.max(0, Math.min(h - 1, y));
-    if(cxp >= x0 && cxp <= x1 && cyp >= y0 && cyp <= y1) return snap[(cyp - y0) * bw + (cxp - x0)];
-    return mask[cyp * w + cxp];
-  };
-  const kernelR = Math.max(1, Math.round(stiffness * 3));
-  const kernelR2 = kernelR * kernelR;
-  for(let y = y0; y <= y1; y++){
-    for(let x = x0; x <= x1; x++){
-      const ddx = x - cx, ddy = y - cy;
-      if(ddx * ddx + ddy * ddy > radius * radius) continue;
-      let sum = 0, cnt = 0;
-      for(let ky = -kernelR; ky <= kernelR; ky++){
-        for(let kx = -kernelR; kx <= kernelR; kx++){
-          if(kx * kx + ky * ky > kernelR2) continue;
-          sum += read(x + kx, y + ky); cnt++;
-        }
-      }
-      mask[y * w + x] = (sum / cnt >= 0.5) ? 1 : 0;
-    }
-  }
-}
-
 /* --- exact Euclidean distance transform (Felzenszwalb & Huttenlocher) ---
    dt1d computes, for each q, min over p of (q-p)^2 + f[p] using the
    lower-envelope-of-parabolas method. Applied per column then per row it
@@ -2641,6 +2573,11 @@ function mprPolygonRegion(pts, w, h){
 function mprApplyRegion(mask, region, add, w, h){
   for(let i = 0; i < w * h; i++) if(region[i]) mask[i] = add ? 1 : 0;
 }
+// MPR sibling of xorRegion — see its comment for why the Pencil's
+// Eclipse-style redraw toggles rather than only adding or only removing.
+function mprXorRegion(mask, region, w, h){
+  for(let i = 0; i < w * h; i++) if(region[i]) mask[i] ^= 1;
+}
 function mprStampDisc(mask, cx, cy, diameter, val, w, h){
   const r = diameter / 2, r2 = r * r;
   const xa = Math.max(0, Math.floor(cx - r)), xb = Math.min(w - 1, Math.ceil(cx + r));
@@ -3030,7 +2967,7 @@ function renderMprPane(plane){
       ctx.lineTo(p[0], p[1]);
     }
     ctx.closePath();
-    ctx.strokeStyle = getRadio('pencil-mode') === 'add' ? '#7cfc7c' : '#ff6b6b';
+    ctx.strokeStyle = mprDrag.splice ? '#ffd54f' : (getRadio('pencil-mode') === 'add' ? '#7cfc7c' : '#ff6b6b');
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -3185,31 +3122,29 @@ function mprPaneInteraction(plane){
       const s = structures[activeIdx];
       pushUndo();
       const cols = dicomVolume.cols, rows = dicomVolume.rows;
-      const existingMask = s.volMasks ? s.volMasks[z] : null;
-      const grabR = mprPencilGrabDiameterVoxels() / 2;
-      const grabbing = tool === 'pencil' && !shiftDown &&
-        existingMask && nearMaskBoundary(existingMask, cols, rows, vx, vy, grabR);
-      if(grabbing){
-        // Click-drag on the existing contour: warp that patch to follow the
-        // cursor (a real "grab and pull the line"), not a stamp.
-        mprDrag = {kind: 'warp', z, lastX: vx, lastY: vy, radius: grabR};
-      }else{
+      // Same stamp-value logic as the 2D canvas: Eraser always erases,
+      // Shift temporarily erases over Pencil/Brush, Brush follows its
+      // Paint/Erase mode.
+      let val = null;
+      if(tool === 'eraser') val = 0;
+      else if(shiftDown) val = 0;
+      else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
+      if(val !== null){
         const dia = mprBrushDiameterVoxels();
-        // Same stamp-value logic as the 2D canvas: Eraser always erases,
-        // Shift temporarily erases over Pencil/Brush, Brush follows its
-        // Paint/Erase mode.
-        let val = null;
-        if(tool === 'eraser') val = 0;
-        else if(shiftDown) val = 0;
-        else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
-        if(val !== null){
-          const mask = getVolMask(s, z, true);
-          mprStampDisc(mask, vx, vy, dia, val, cols, rows);
-          mprInvalidateSegCache(mask);
-          mprDrag = {kind: 'stamp', z, lastX: vx, lastY: vy, val, dia};
-        }else{
-          mprDrag = {kind: 'pencil', z, pts: [[vx, vy]]};
-        }
+        const mask = getVolMask(s, z, true);
+        mprStampDisc(mask, vx, vy, dia, val, cols, rows);
+        mprInvalidateSegCache(mask);
+        mprDrag = {kind: 'stamp', z, lastX: vx, lastY: vy, val, dia};
+      }else{
+        // Pencil, freehand draw. Eclipse-style: starting on/near the
+        // existing contour means the closed loop this stroke traces
+        // (auto-closed back to this start point) toggles with the current
+        // shape — replacing whichever stretch of line it crosses — instead
+        // of just adding a new region.
+        const existingMask = s.volMasks ? s.volMasks[z] : null;
+        const grabR = mprPencilGrabDiameterVoxels() / 2;
+        const splice = !!existingMask && nearMaskBoundary(existingMask, cols, rows, vx, vy, grabR);
+        mprDrag = {kind: 'pencil', z, pts: [[vx, vy]], splice};
       }
       renderMprPane('axial');
       return;
@@ -3263,11 +3198,6 @@ function mprPaneInteraction(plane){
         mprStampSegment(mask, mprDrag.lastX, mprDrag.lastY, vx, vy, mprDrag.dia, mprDrag.val, dicomVolume.cols, dicomVolume.rows);
         mprInvalidateSegCache(mask);
         mprDrag.lastX = vx; mprDrag.lastY = vy;
-      }else if(mprDrag.kind === 'warp' && s){
-        const mask = getVolMask(s, mprDrag.z, true);
-        applyMaskWarpStep(mask, dicomVolume.cols, dicomVolume.rows, vx, vy, vx - mprDrag.lastX, vy - mprDrag.lastY, mprDrag.radius, +$('pencil-stiff').value / 100);
-        mprInvalidateSegCache(mask);
-        mprDrag.lastX = vx; mprDrag.lastY = vy;
       }
       renderMprPane('axial');
       return;
@@ -3294,8 +3224,14 @@ function mprPaneInteraction(plane){
       if(mprDrag.kind === 'pencil' && mprDrag.pts.length > 2 && activeIdx >= 0){
         const s = structures[activeIdx];
         const mask = getVolMask(s, mprDrag.z, true);
-        const region = mprPolygonRegion(smoothFreehandPath(mprDrag.pts, true), dicomVolume.cols, dicomVolume.rows);
-        mprApplyRegion(mask, region, getRadio('pencil-mode') === 'add', dicomVolume.cols, dicomVolume.rows);
+        // Splice mode keeps the smoothing open (not closed/wrapped) so the
+        // start/end anchor points stay put where they touch the existing
+        // contour, instead of being blended with far-away points from the
+        // opposite end of the stroke — polygonRegion still closes the
+        // final shape regardless.
+        const region = mprPolygonRegion(smoothFreehandPath(mprDrag.pts, !mprDrag.splice), dicomVolume.cols, dicomVolume.rows);
+        if(mprDrag.splice) mprXorRegion(mask, region, dicomVolume.cols, dicomVolume.rows);
+        else mprApplyRegion(mask, region, getRadio('pencil-mode') === 'add', dicomVolume.cols, dicomVolume.rows);
         mprInvalidateSegCache(mask);
       }
       mprDrag = null;
@@ -3662,9 +3598,9 @@ function scheduleDraw(){
 }
 // Cheap per-pixel outline (a mask pixel is boundary if any 4-neighbour is
 // outside the mask) — used only while a structure's mask is being actively
-// painted every frame (Brush/Eraser stroke, Pencil boundary-grab warp),
-// since the smooth vector trace below is too expensive to recompute that
-// often. Blocky up close, but only shown transiently mid-drag.
+// painted every frame (Brush/Eraser stroke), since the smooth vector trace
+// below is too expensive to recompute that often. Blocky up close, but
+// only shown transiently mid-drag.
 function drawMaskOutlineRaster(ctx, mask, w, h, color){
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
@@ -3730,10 +3666,11 @@ function draw(){
     if(s.dirty) rebuildCache(s);
     ctx.drawImage(s.cache, 0, 0);
   }
-  // Boundary being actively repainted every frame (Brush/Eraser stroke,
-  // Pencil grab-warp) gets the cheap raster outline; everything else gets
-  // the smooth vector trace.
-  const liveMaskDrag = drag && (drag.kind === 'stroke' || drag.kind === 'warp') ? active() : null;
+  // Boundary being actively repainted every frame (Brush/Eraser stroke)
+  // gets the cheap raster outline; everything else gets the smooth vector
+  // trace — Pencil's freehand draw (including the Eclipse-style redraw)
+  // only touches the mask once on release, so it never needs the fallback.
+  const liveMaskDrag = drag && drag.kind === 'stroke' ? active() : null;
   for(const s of structures){
     if(!s.visible) continue;
     if(s === liveMaskDrag) drawMaskOutlineRaster(ctx, s.mask, W, H, s.color);
@@ -3758,7 +3695,7 @@ function draw(){
     }
     ctx.closePath();
     if(drag.kind === 'pencil'){
-      ctx.strokeStyle = getRadio('pencil-mode') === 'add' ? '#7cfc7c' : '#ff6b6b';
+      ctx.strokeStyle = drag.splice ? '#ffd54f' : (getRadio('pencil-mode') === 'add' ? '#7cfc7c' : '#ff6b6b');
       ctx.setLineDash([]);
     }else{
       ctx.strokeStyle = '#4fc3f7';
@@ -4105,33 +4042,29 @@ cv.addEventListener('pointerdown', e => {
   if(!s) return;
 
   if(tool === 'pencil' || tool === 'brush' || tool === 'eraser'){
-    const grabR = +$('pencil-grab-d').value / 2;
-    const grabbing = tool === 'pencil' && !shiftDown && nearMaskBoundary(s.mask, W, H, mx, my, grabR);
-    if(grabbing){
-      // Click-drag on the existing boundary: warp that patch of the mask to
-      // follow the cursor (a real "grab and pull the line"), not a stamp.
+    // Which stamp value to paint with, or null to fall back to Pencil's
+    // freehand draw: Eraser always erases; Shift temporarily erases over
+    // Pencil/Brush; Brush follows its Paint/Erase mode.
+    let val = null;
+    if(tool === 'eraser') val = 0;
+    else if(shiftDown) val = 0;
+    else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
+    if(val !== null){
+      const d = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
       pushUndo();
       mprInvalidateSegCache(s.mask);
-      drag = {kind: 'warp', lastX: mx, lastY: my, radius: grabR};
+      stampDisc(s.mask, mx, my, d, val);
+      s.dirty = true;
+      drag = {kind: 'stroke', last: [mx, my], d, val};
     }else{
-      const d = tool === 'eraser' ? +$('eraser-d').value : +$('brush-d').value;
-      // Which stamp value to paint with, or null to fall back to Pencil's
-      // normal freehand-polygon draw: Eraser always erases; Shift
-      // temporarily erases over Pencil/Brush; Brush follows its Paint/Erase
-      // mode.
-      let val = null;
-      if(tool === 'eraser') val = 0;
-      else if(shiftDown) val = 0;
-      else if(tool === 'brush') val = getRadio('brush-mode') === 'paint' ? 1 : 0;
-      if(val !== null){
-        pushUndo();
-        mprInvalidateSegCache(s.mask);
-        stampDisc(s.mask, mx, my, d, val);
-        s.dirty = true;
-        drag = {kind: 'stroke', last: [mx, my], d, val};
-      }else{
-        drag = {kind: 'pencil', pts: [[mx, my]]};
-      }
+      // Pencil, freehand draw. Eclipse-style: starting on/near the existing
+      // boundary means the closed loop this stroke traces (auto-closed
+      // back to this start point) toggles with the current shape —
+      // replacing whichever stretch of line it crosses — instead of just
+      // adding a new region.
+      const grabR = +$('pencil-grab-d').value / 2;
+      const splice = nearMaskBoundary(s.mask, W, H, mx, my, grabR);
+      drag = {kind: 'pencil', pts: [[mx, my]], splice};
     }
   }else if(tool === 'crop'){
     const cshape = getRadio('crop-shape');
@@ -4163,13 +4096,6 @@ cv.addEventListener('pointermove', e => {
         s.dirty = true;
       }
       drag.last = [mx, my];
-    }else if(drag.kind === 'warp'){
-      const s = active();
-      if(s){
-        applyMaskWarpStep(s.mask, W, H, mx, my, mx - drag.lastX, my - drag.lastY, drag.radius, +$('pencil-stiff').value / 100);
-        s.dirty = true;
-      }
-      drag.lastX = mx; drag.lastY = my;
     }else if(drag.kind === 'croprect'){
       drag.p1 = [mx, my];
     }else if(drag.kind === 'shape'){
@@ -4195,7 +4121,14 @@ cv.addEventListener('pointerup', e => {
 
   if(d.kind === 'pencil' && s && d.pts.length >= 3){
     pushUndo();
-    applyRegion(s.mask, polygonRegion(smoothFreehandPath(d.pts, true)), getRadio('pencil-mode') === 'add');
+    // Splice mode keeps the smoothing open (not closed/wrapped) so the
+    // start/end anchor points stay put where they touch the existing
+    // contour, instead of being blended with far-away points from the
+    // opposite end of the stroke — polygonRegion still closes the final
+    // shape regardless.
+    const region = polygonRegion(smoothFreehandPath(d.pts, !d.splice));
+    if(d.splice) xorRegion(s.mask, region);
+    else applyRegion(s.mask, region, getRadio('pencil-mode') === 'add');
     mprInvalidateSegCache(s.mask);
     s.dirty = true;
   }else if(d.kind === 'croprect' && s){
@@ -4283,9 +4216,6 @@ $('pencil-grab-d').addEventListener('input', () => {
   $('pencil-grab-d-lbl').textContent = $('pencil-grab-d').value;
   scheduleDraw();
   if(mprMode && dicomVolume) renderAllMprPanes();
-});
-$('pencil-stiff').addEventListener('input', () => {
-  $('pencil-stiff-lbl').textContent = $('pencil-stiff').value;
 });
 $('shape-sides').addEventListener('input', () => {
   $('shape-sides-lbl').textContent = $('shape-sides').value; scheduleDraw();
