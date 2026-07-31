@@ -2680,6 +2680,35 @@ function mprSignedDistanceField(mask, cols, rows){
   }
   return out;
 }
+// Separable box blur (3-tap, edge-replicated), applied a few times to
+// approximate a small Gaussian — used to soften the SDF before tracing so
+// the traced contour rounds off the raster's 1px staircase instead of
+// reproducing it exactly. marching squares interpolates the zero-crossing
+// *precisely*, but "precisely" on an unblurred binary mask's distance field
+// just means precisely retracing the pixel grid; the field itself has to be
+// smoothed for the curve to look hand-drawn rather than blocky.
+function mprBlurField(field, cols, rows, iterations){
+  let cur = field;
+  for(let it = 0; it < iterations; it++){
+    const tmp = new Float32Array(cols * rows);
+    for(let y = 0; y < rows; y++){
+      const row = y * cols;
+      for(let x = 0; x < cols; x++){
+        const xl = x > 0 ? x - 1 : x, xr = x < cols - 1 ? x + 1 : x;
+        tmp[row + x] = (cur[row + xl] + 2 * cur[row + x] + cur[row + xr]) * 0.25;
+      }
+    }
+    const out = new Float32Array(cols * rows);
+    for(let y = 0; y < rows; y++){
+      const yt = y > 0 ? y - 1 : y, yb = y < rows - 1 ? y + 1 : y;
+      for(let x = 0; x < cols; x++){
+        out[y * cols + x] = (tmp[yt * cols + x] + 2 * tmp[y * cols + x] + tmp[yb * cols + x]) * 0.25;
+      }
+    }
+    cur = out;
+  }
+  return cur;
+}
 /* ===================== High-resolution contour outline ===================== */
 // Traces the zero level-set of a continuous scalar field (here, a signed
 // distance field) via marching squares, with linear interpolation along
@@ -2752,7 +2781,7 @@ function getMprContourSegments(mask, w, h){
   // only occupies a fraction of a large mask (e.g. the 2D editor's 800×600),
   // this is the difference between a barely-there recompute and a
   // noticeable stutter right when a drag ends and the cache is invalidated.
-  const bbox = maskBoundingBox(mask, w, h, 2);
+  const bbox = maskBoundingBox(mask, w, h, 4);
   let segments;
   if(!bbox){
     segments = [];
@@ -2763,7 +2792,7 @@ function getMprContourSegments(mask, w, h){
     for(let y = y0; y <= y1; y++){
       for(let x = x0; x <= x1; x++) sub[(y - y0) * bw + (x - x0)] = mask[y * w + x];
     }
-    const sdf = mprSignedDistanceField(sub, bw, bh);
+    const sdf = mprBlurField(mprSignedDistanceField(sub, bw, bh), bw, bh, 2);
     const rawSegments = mprMarchingSquares(sdf, bw, bh);
     segments = rawSegments.map(([p0, p1]) => [[p0[0] + x0, p0[1] + y0], [p1[0] + x0, p1[1] + y0]]);
   }
