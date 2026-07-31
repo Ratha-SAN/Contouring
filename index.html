@@ -878,8 +878,18 @@ function smoothFreehandPath(pts, closed){
   return chaikinSmooth(filtered, 3, closed);
 }
 /* Freehand polygon -> region mask. The polygon is filled on an offscreen
-   canvas and thresholded at 50% alpha to binarize the antialiased edge. */
-function polygonRegion(pts){
+   canvas and thresholded at 50% alpha to binarize the antialiased edge.
+   `minWidth`, when set, also strokes the *open* path (not the synthetic
+   closing edge) at that width and ORs it in — without this, a splice-mode
+   stroke that's nearly a straight line out-and-not-quite-back closes into a
+   sliver of near-zero area (the auto-close chord runs almost back over the
+   forward path), so the single most obvious "grab the line and drag it out"
+   gesture would silently do nothing. The minimum-width ribbon guarantees
+   that gesture always displaces at least a grab-diameter-wide swath — the
+   same width already shown by the hover highlight, so what's highlighted is
+   what visibly moves. Real freehand loop traces (whose enclosed area is
+   already bigger than the ribbon) are effectively unaffected by it.  */
+function polygonRegion(pts, minWidth){
   polyCtx.clearRect(0, 0, W, H);
   polyCtx.fillStyle = '#fff';
   polyCtx.beginPath();
@@ -887,6 +897,27 @@ function polygonRegion(pts){
   for(let i = 1; i < pts.length; i++) polyCtx.lineTo(pts[i][0], pts[i][1]);
   polyCtx.closePath();
   polyCtx.fill();
+  if(minWidth > 0 && pts.length > 1){
+    polyCtx.beginPath();
+    polyCtx.moveTo(pts[0][0], pts[0][1]);
+    for(let i = 1; i < pts.length; i++) polyCtx.lineTo(pts[i][0], pts[i][1]);
+    polyCtx.strokeStyle = '#fff';
+    polyCtx.lineWidth = minWidth;
+    polyCtx.lineJoin = 'round';
+    // Butt cap, not round: a round cap at pts[0] (pinned at/near the
+    // existing boundary) would bulge the ribbon past that anchor point in
+    // whatever direction is perpendicular to the stroke there — outward for
+    // an inward pull, inward for an outward pull — XORing in a small
+    // unrelated bump/notch right at the attachment. Only the free end
+    // (pts[last], away from the boundary) should look rounded, so that's
+    // capped separately below instead of via lineCap here.
+    polyCtx.lineCap = 'butt';
+    polyCtx.stroke();
+    const last = pts[pts.length - 1];
+    polyCtx.beginPath();
+    polyCtx.arc(last[0], last[1], minWidth / 2, 0, Math.PI * 2);
+    polyCtx.fill();
+  }
   const d = polyCtx.getImageData(0, 0, W, H).data;
   const reg = new Uint8Array(W * H);
   for(let i = 0; i < W * H; i++) reg[i] = d[i * 4 + 3] >= 128 ? 1 : 0;
@@ -2563,7 +2594,7 @@ function resetMprView(){
 // Width/height-parameterized siblings of polygonRegion/applyRegion/stampDisc/
 // stampSegment (mask math, above), kept separate from those so Axial drawing
 // (arbitrary volume resolution) never touches the 2D canvas's fixed-W/H code.
-function mprPolygonRegion(pts, w, h){
+function mprPolygonRegion(pts, w, h, minWidth){
   mprPolyCv.width = w; mprPolyCv.height = h;
   mprPolyCtx.clearRect(0, 0, w, h);
   mprPolyCtx.fillStyle = '#fff';
@@ -2572,6 +2603,23 @@ function mprPolygonRegion(pts, w, h){
   for(let i = 1; i < pts.length; i++) mprPolyCtx.lineTo(pts[i][0], pts[i][1]);
   mprPolyCtx.closePath();
   mprPolyCtx.fill();
+  if(minWidth > 0 && pts.length > 1){
+    mprPolyCtx.beginPath();
+    mprPolyCtx.moveTo(pts[0][0], pts[0][1]);
+    for(let i = 1; i < pts.length; i++) mprPolyCtx.lineTo(pts[i][0], pts[i][1]);
+    mprPolyCtx.strokeStyle = '#fff';
+    mprPolyCtx.lineWidth = minWidth;
+    mprPolyCtx.lineJoin = 'round';
+    // Butt, not round — see polygonRegion's comment: a round cap at the
+    // anchor end (pts[0]) would bulge the ribbon past that point in the
+    // "wrong" direction. Only the free end gets rounded, below.
+    mprPolyCtx.lineCap = 'butt';
+    mprPolyCtx.stroke();
+    const last = pts[pts.length - 1];
+    mprPolyCtx.beginPath();
+    mprPolyCtx.arc(last[0], last[1], minWidth / 2, 0, Math.PI * 2);
+    mprPolyCtx.fill();
+  }
   const d = mprPolyCtx.getImageData(0, 0, w, h).data;
   const reg = new Uint8Array(w * h);
   for(let i = 0; i < w * h; i++) reg[i] = d[i * 4 + 3] >= 128 ? 1 : 0;
@@ -3265,7 +3313,7 @@ function mprPaneInteraction(plane){
         // contour, instead of being blended with far-away points from the
         // opposite end of the stroke — polygonRegion still closes the
         // final shape regardless.
-        const region = mprPolygonRegion(smoothFreehandPath(mprDrag.pts, !mprDrag.splice), dicomVolume.cols, dicomVolume.rows);
+        const region = mprPolygonRegion(smoothFreehandPath(mprDrag.pts, !mprDrag.splice), dicomVolume.cols, dicomVolume.rows, mprDrag.splice ? mprPencilGrabDiameterVoxels() : 0);
         if(mprDrag.splice) mprXorRegion(mask, region, dicomVolume.cols, dicomVolume.rows);
         else mprApplyRegion(mask, region, getRadio('pencil-mode') === 'add', dicomVolume.cols, dicomVolume.rows);
         mprInvalidateSegCache(mask);
@@ -4162,7 +4210,7 @@ cv.addEventListener('pointerup', e => {
     // contour, instead of being blended with far-away points from the
     // opposite end of the stroke — polygonRegion still closes the final
     // shape regardless.
-    const region = polygonRegion(smoothFreehandPath(d.pts, !d.splice));
+    const region = polygonRegion(smoothFreehandPath(d.pts, !d.splice), d.splice ? +$('pencil-grab-d').value : 0);
     if(d.splice) xorRegion(s.mask, region);
     else applyRegion(s.mask, region, getRadio('pencil-mode') === 'add');
     mprInvalidateSegCache(s.mask);
